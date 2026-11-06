@@ -25,7 +25,7 @@ The product thesis is:
 
 ### Frontend
 
-The main application is currently concentrated in [app/page.tsx](./app/page.tsx).
+The app is route-based (App Router). Shared client state lives in [components/mesh/mesh-provider.tsx](./components/mesh/mesh-provider.tsx); views are in `components/mesh/*`; routes are thin wrappers in `app/(console)/*/page.tsx`, and `app/(console)/layout.tsx` redirects to `/login` without a valid session. `/` is the Head Agent chat (direct chat with any of the six agents, each with its own thread, plus a group channel that fans one message out to all agents). Agent definitions are in [lib/agents.ts](./lib/agents.ts).
 
 Implemented UI and interactions:
 
@@ -62,11 +62,15 @@ The server-side chat endpoint is [app/api/agent-chat/route.ts](./app/api/agent-c
 It currently:
 
 - Keeps API keys on the server
-- Accepts an agent ID, operator context, and recent chat messages
+- Requires a session and an owner or operator role, and is rate limited per user
+- Accepts an agent ID, channel, one new message, a `clientTurnId` (makes retries and group fan-out idempotent), and operator context
+- Owns chat history: messages are stored server-side and history is read from the database, never taken from the client
+- Writes an audit event for every reply and failure, without message content
 - Applies a role-specific system instruction
 - Calls Google Gemini through the Google AI Studio REST API
-- Uses `gemini-2.5-flash` by default
+- Uses `gemini-flash-lite-latest` by default (`gemini-2.5-flash` is retired for new keys and `gemini-flash-latest` returned 503 under load). Retries 429/503 with backoff. Do not send `thinkingBudget` — some models reject it.
 - Returns a structured JSON assistant response
+- Tells agents they have no tools and must not claim work was done (a prompt instruction, not a guarantee)
 - Has bounded message/context lengths
 - Does not invent suppliers, quotes, transactions, attestations, or tool results
 - Reports provider failures explicitly
@@ -77,7 +81,7 @@ The template is [.env.example](./.env.example). Current provider settings:
 
 ```env
 MESH_AI_PROVIDER=google
-MESH_AI_MODEL=gemini-2.5-flash
+MESH_AI_MODEL=gemini-flash-lite-latest
 GEMINI_API_KEY=...
 ```
 
@@ -105,14 +109,21 @@ OpenRouter and Groq remain possible future adapters, but Google AI Studio is the
 - Guard Watcher telemetry and threshold logic
 - Key revocation helper
 
+### Persistence and auth
+
+- Database: Drizzle ORM on libSQL. Local SQLite file at `data/mesh.db` (gitignored); a hosted libSQL URL also works through `DATABASE_URL`.
+- Schema: [lib/db/schema.ts](./lib/db/schema.ts) has every P0 table. Migrations are in `drizzle/`. Money is integer cents.
+- Wired to the app so far: users, memberships, sessions, conversations, messages, audit events, rate limits. Created but unused by the UI: agents, mandates, policies, suppliers, RFQs, bids, orders, milestones, evidence, settlements. Those pages still show simulated in-memory data.
+- Auth: email and password (scrypt) with hashed, server-side sessions in an httpOnly cookie. No public sign-up. See [lib/auth.ts](./lib/auth.ts).
+- Setup: set `MESH_OPERATOR_EMAIL` and `MESH_OPERATOR_PASSWORD`, then `npm run db:setup`. After a schema change run `npm run db:generate`, then `npm run db:setup`.
+- Login rate limiting is per email, so an attacker can lock an operator out for 15 minutes. Add per-IP limits before exposing this publicly.
+
 ## Important prototype limitations
 
 This is not production-ready yet:
 
-- React state is in memory; refresh loses data.
-- Chat history is not persisted.
+- Procurement state (orders, policies, registry) is in browser memory; refresh loses it. Chat and audit are persisted.
 - Gemini responses are not streamed.
-- The AI endpoint has no authentication or organization authorization.
 - The Head Agent has no real tool calling.
 - Specialized agents are prompt-routed personas, not independent durable workers.
 - Supplier discovery, quotes, compliance, and evidence are simulated.
@@ -120,11 +131,10 @@ This is not production-ready yet:
 - Transaction hashes and Intent routes may be mock/local unless a real endpoint is supplied.
 - There is no deployed procurement contract.
 - There is no contract event indexer.
-- There is no database, migration system, auth system, or organization model.
+- One organization and one operator are seeded; there is no invitation, password reset, or multi-org switching.
 - Guard Watcher is an in-memory browser/service primitive, not a persistent server monitor.
-- Navigation is client-side state rather than route-based workspaces.
-- Most UI is still implemented in one large page component.
-- No automated unit, integration, contract, or end-to-end test suite exists.
+- Orders, policies, registry and audit pages are in-memory/simulated and labelled as such.
+- Only a Playwright e2e suite exists. `npm run test:e2e` uses a throwaway database and a fake provider (`tests/fake-provider.mjs`). `MESH_LIVE=1 npx playwright test tests/live-chat.spec.ts` calls the real provider. No unit or contract tests.
 
 Never describe a locally generated hash as a confirmed blockchain transaction.
 
@@ -150,7 +160,7 @@ Start with one organization, one operator, one procurement workflow, and NEAR te
 
 ### P0: Add persistence
 
-Create a database and server-side models for:
+Schema exists (see Persistence and auth). Still needed: server-side CRUD and moving the UI onto it for:
 
 - Organizations
 - Users and memberships
@@ -169,13 +179,10 @@ Create a database and server-side models for:
 
 ### P0: Secure the AI endpoint
 
-Add:
+Done: authentication, role authorization, request validation, rate limiting, conversation persistence, audit events for chat.
 
-- Authentication
-- Organization and role authorization
-- Request validation
-- Rate limiting
-- Conversation persistence
+Still needed once tool calling exists:
+
 - Tool-call authorization
 - Human confirmation for irreversible actions
 - Audit events for every tool call
