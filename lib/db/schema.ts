@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm"
-import { index, integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core"
+import { index, integer, real, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core"
 
 /**
  * Money columns are integer minor units (USD/USDC cents) to avoid float rounding.
@@ -101,14 +101,14 @@ export const suppliers = sqliteTable("suppliers", {
   nearAccountId: text("near_account_id"),
   verificationStatus: text("verification_status", { enum: ["unverified", "verified", "rejected"] }).notNull().default("unverified"),
   createdAt: createdAt(),
-}, (t) => [index("suppliers_org").on(t.orgId)])
+}, (t) => [uniqueIndex("suppliers_org_name").on(t.orgId, t.name)])
 
 export const rfqs = sqliteTable("rfqs", {
   id: id(),
   orgId: orgId(),
   createdByUserId: text("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
   resource: text("resource").notNull(),
-  quantity: integer("quantity").notNull(),
+  quantity: real("quantity").notNull(),
   unit: text("unit").notNull(),
   maxBudgetCents: integer("max_budget_cents").notNull(),
   deadline: text("deadline").notNull(),
@@ -126,7 +126,10 @@ export const bids = sqliteTable("bids", {
   leadTimeDays: integer("lead_time_days"),
   status: text("status", { enum: ["submitted", "selected", "rejected"] }).notNull().default("submitted"),
   createdAt: createdAt(),
-}, (t) => [index("bids_rfq").on(t.rfqId)])
+}, (t) => [
+  // One bid per supplier, so a required bid count means distinct suppliers.
+  uniqueIndex("bids_rfq_supplier").on(t.rfqId, t.supplierId),
+])
 
 export const orders = sqliteTable("orders", {
   id: id(),
@@ -175,6 +178,24 @@ export const settlements = sqliteTable("settlements", {
   createdAt: createdAt(),
 }, (t) => [uniqueIndex("settlements_org_idempotency").on(t.orgId, t.idempotencyKey)])
 
+// --- Human approvals ---
+
+/** Something an agent asked for. Only a signed-in human can move it out of "pending". */
+export const approvals = sqliteTable("approvals", {
+  id: id(),
+  orgId: orgId(),
+  kind: text("kind", { enum: ["create_rfq"] }).notNull(),
+  requestedByAgent: text("requested_by_agent").notNull(),
+  requestedByUserId: text("requested_by_user_id").references(() => users.id, { onDelete: "set null" }),
+  payload: text("payload", { mode: "json" }).$type<Record<string, unknown>>().notNull(),
+  status: text("status", { enum: ["pending", "approved", "rejected"] }).notNull().default("pending"),
+  decidedByUserId: text("decided_by_user_id").references(() => users.id, { onDelete: "set null" }),
+  decidedAt: integer("decided_at"),
+  // The record created on approval, such as an RFQ id.
+  resultId: text("result_id"),
+  createdAt: createdAt(),
+}, (t) => [index("approvals_org").on(t.orgId, t.status)])
+
 // --- Conversations and audit ---
 
 export const conversations = sqliteTable("conversations", {
@@ -195,6 +216,7 @@ export const messages = sqliteTable("messages", {
   content: text("content").notNull(),
   // Client-generated turn id: makes retries and group fan-out idempotent.
   clientTurnId: text("client_turn_id").notNull(),
+  approvalId: text("approval_id").references(() => approvals.id, { onDelete: "set null" }),
   createdAt: createdAt(),
 }, (t) => [uniqueIndex("messages_turn_author").on(t.conversationId, t.clientTurnId, t.author)])
 

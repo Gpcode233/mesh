@@ -50,7 +50,7 @@ export function Sidebar() {
           {NAV_ITEMS.map((item) => {
             const active = isActive(pathname, item.href)
             return (
-              <Link key={item.href} href={item.href} className={`flex items-center gap-3 rounded-xl px-3 py-2.5 text-left text-sm transition-all duration-200 ${active ? "bg-foreground text-background shadow-sm" : "text-muted-foreground hover:bg-accent/50 hover:text-foreground"}`}>
+              <Link key={item.href} href={item.href} prefetch={false} className={`flex items-center gap-3 rounded-xl px-3 py-2.5 text-left text-sm transition-all duration-200 ${active ? "bg-foreground text-background shadow-sm" : "text-muted-foreground hover:bg-accent/50 hover:text-foreground"}`}>
                 <span className={active ? "text-background" : "text-primary"}>{item.icon}</span>
                 <span className="flex-1">{item.label}</span>
                 {item.badge && <span className={`text-[9px] font-semibold tracking-wider ${active ? "text-[#a7ddb0]" : "text-primary"}`}>{item.badge}</span>}
@@ -77,7 +77,7 @@ export function MobileNav() {
     <nav className="flex gap-1 overflow-x-auto border-t border-foreground/10 px-3 py-2 lg:hidden">
       {NAV_ITEMS.map((item) => {
         const active = isActive(pathname, item.href)
-        return <Link key={item.href} href={item.href} className={`flex shrink-0 items-center gap-2 rounded-full px-3 py-1.5 text-xs ${active ? "bg-foreground text-background" : "text-muted-foreground"}`}>{item.label}</Link>
+        return <Link key={item.href} href={item.href} prefetch={false} className={`flex shrink-0 items-center gap-2 rounded-full px-3 py-1.5 text-xs ${active ? "bg-foreground text-background" : "text-muted-foreground"}`}>{item.label}</Link>
       })}
     </nav>
   )

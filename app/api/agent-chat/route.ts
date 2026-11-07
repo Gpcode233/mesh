@@ -7,7 +7,9 @@ import { canOperate, getSession } from "@/lib/auth"
 import { historyForAgent } from "@/lib/chat-history"
 import { getDb } from "@/lib/db"
 import { conversations, messages } from "@/lib/db/schema"
+import { getApprovalViews, proposeRfq } from "@/lib/procurement"
 import { consumeRateLimit, limitFromEnv } from "@/lib/rate-limit"
+import { parseRfqDraft, type ApprovalView } from "@/lib/rfq"
 
 const MAX_CONTENT = 4000
 const HISTORY_LIMIT = 12
@@ -61,13 +63,16 @@ export async function POST(request: NextRequest) {
     eq(messages.author, "user"),
   ))
 
-  // A retried turn returns the stored reply instead of calling the model again.
+  // A retried turn returns the stored reply instead of calling the model or drafting again.
   const [existing] = await db.select().from(messages).where(and(
     eq(messages.conversationId, conversation.id),
     eq(messages.clientTurnId, clientTurnId),
     eq(messages.author, agent),
   ))
-  if (existing) return Response.json({ agent, content: existing.content })
+  if (existing) {
+    const stored = existing.approvalId ? await getApprovalViews(session.orgId, [existing.approvalId]) : undefined
+    return Response.json({ agent, content: existing.content, approval: (existing.approvalId && stored?.get(existing.approvalId)) || null })
+  }
 
   // Cut at this turn so agents answering in parallel do not see each other's replies to it.
   const recent = await db.select({ author: messages.author, content: messages.content }).from(messages)
@@ -78,10 +83,26 @@ export async function POST(request: NextRequest) {
 
   const audit = { orgId: session.orgId, actorUserId: session.userId, target: agent }
   try {
-    const reply = await callAgentModel({ agent, context, messages: history })
-    await db.insert(messages).values({ conversationId: conversation.id, author: agent, content: reply.content, clientTurnId }).onConflictDoNothing()
+    // The Head Agent drafts RFQs in its private thread only. One proposal per group message would multiply cards.
+    const reply = await callAgentModel({ agent, context, messages: history, allowTools: agent === "head" && channel === "direct" })
+
+    let replyText = reply.content
+    let approval: ApprovalView | null = null
+    if (reply.proposeRfqArgs !== undefined) {
+      await recordAudit({ ...audit, action: "agent_tool.called", metadata: { tool: "propose_rfq", messageId: userMessage.id } })
+      const parsed = parseRfqDraft(reply.proposeRfqArgs)
+      if (parsed.ok) {
+        approval = await proposeRfq(session, agent, parsed.draft)
+        replyText = "I drafted this RFQ. Nothing has been created yet: approve it below to create it, or reject it."
+      } else {
+        await recordAudit({ ...audit, action: "agent_tool.rejected", metadata: { tool: "propose_rfq", reason: parsed.error, messageId: userMessage.id } })
+        replyText = `I couldn't draft that RFQ: ${parsed.error} Nothing was created.`
+      }
+    }
+
+    await db.insert(messages).values({ conversationId: conversation.id, author: agent, content: replyText, clientTurnId, approvalId: approval?.id }).onConflictDoNothing()
     await recordAudit({ ...audit, action: "agent_chat.replied", metadata: { channel, provider: reply.provider, model: reply.model, messageId: userMessage.id } })
-    return Response.json({ agent, content: reply.content })
+    return Response.json({ agent, content: replyText, approval })
   } catch (error) {
     const status = error instanceof ProviderError ? error.status : 500
     const message = error instanceof ProviderError ? error.message : "The agent could not respond."

@@ -2,6 +2,7 @@ import { and, asc, eq } from "drizzle-orm"
 import { getSession } from "@/lib/auth"
 import { getDb } from "@/lib/db"
 import { conversations, messages } from "@/lib/db/schema"
+import { getApprovalViews } from "@/lib/procurement"
 
 /** The caller's own persisted threads, oldest message first. */
 export async function GET() {
@@ -9,10 +10,21 @@ export async function GET() {
   if (!session) return Response.json({ error: "Sign in required." }, { status: 401 })
 
   const rows = await getDb()
-    .select({ id: messages.id, channel: conversations.channel, author: messages.author, content: messages.content, clientTurnId: messages.clientTurnId })
+    .select({
+      id: messages.id,
+      channel: conversations.channel,
+      author: messages.author,
+      content: messages.content,
+      clientTurnId: messages.clientTurnId,
+      approvalId: messages.approvalId,
+    })
     .from(messages)
     .innerJoin(conversations, eq(conversations.id, messages.conversationId))
     .where(and(eq(conversations.orgId, session.orgId), eq(conversations.userId, session.userId)))
     .orderBy(asc(messages.id))
-  return Response.json({ messages: rows })
+
+  const approvals = await getApprovalViews(session.orgId, rows.flatMap((row) => (row.approvalId ? [row.approvalId] : [])))
+  return Response.json({
+    messages: rows.map(({ approvalId, ...row }) => ({ ...row, approval: (approvalId && approvals.get(approvalId)) || null })),
+  })
 }

@@ -3,17 +3,18 @@
 import { useState } from "react"
 import Link from "next/link"
 import {
-  IconActivity, IconArrowUpRight, IconChevronDown, IconCheck, IconCircleDot, IconCode, IconCoins, IconCommand,
+  IconActivity, IconArrowUpRight, IconChevronDown, IconCheck, IconCode, IconCoins, IconCommand,
   IconFileInvoice, IconLock, IconMapPin, IconPlus, IconShieldCheck, IconTerminal2, IconRefresh,
 } from "@tabler/icons-react"
 import { Badge } from "@/components/ui/badge"
 import { Button, buttonVariants } from "@/components/ui/button"
 import { useMesh } from "@/components/mesh/mesh-provider"
 import { EconomyMetric, formatTime, Metric, SettlementRow, SimulatedNote, StatusRow } from "@/components/mesh/parts"
-import { suppliers } from "@/lib/mesh-data"
+import { OrderRows, OrdersEmpty } from "@/components/mesh/orders-view"
+import type { OrderRow, SupplierView } from "@/lib/rfq"
 
-export function OverviewView() {
-  const { pipeline, events, wallet, isFrozen, isRevoking, setModalOpen, emergencyFreeze, simulateIntent, simulateKeyRotation } = useMesh()
+export function OverviewView({ orders, suppliers }: { orders: OrderRow[]; suppliers: SupplierView[] }) {
+  const { events, wallet, isFrozen, isRevoking, setModalOpen, emergencyFreeze, simulateIntent, simulateKeyRotation } = useMesh()
   const [isTerminalOpen, setTerminalOpen] = useState(true)
 
   return (
@@ -23,7 +24,7 @@ export function OverviewView() {
           <p className="eyebrow">Control layer / evidence</p>
           <h1 className="mt-5 max-w-3xl text-[clamp(2.6rem,6vw,5.75rem)] font-semibold leading-[0.92] tracking-[-0.075em]">Procurement that<br /><span className="text-muted-foreground">moves itself.</span></h1>
           <p className="mt-7 max-w-xl text-[15px] leading-7 text-muted-foreground">Mesh agents source, negotiate, verify, and settle your next purchase order—within the rules you set.</p>
-          <SimulatedNote />
+          <SimulatedNote>Orders and suppliers are real records. Mandates, spend, guard status, economics and the activity stream are still simulated.</SimulatedNote>
         </div>
         <div className="flex items-center gap-3 lg:pb-1"><Button onClick={() => setModalOpen(true)}><IconPlus size={16} /> New purchase order</Button><Button variant="outline" size="icon" aria-label="Open command menu"><IconCommand size={17} /></Button></div>
       </section>
@@ -31,7 +32,7 @@ export function OverviewView() {
       <section className="editorial-reveal grid border-b border-foreground/10 md:grid-cols-4">
         <Metric label="Active mandates" value={isFrozen ? "00" : "12"} detail={isFrozen ? "Frozen by operator" : "2 expiring this week"} icon={<IconLock size={16} />} />
         <Metric label="Committed spend" value={isFrozen ? "$0" : "$42,180"} detail="82% under daily cap" icon={<IconCoins size={16} />} />
-        <Metric label="Open purchase orders" value={String(pipeline.filter((item) => item.status !== "Settled").length).padStart(2, "0")} detail="+4.2% this week" icon={<IconFileInvoice size={16} />} />
+        <Metric label="Open purchase orders" value={String(orders.filter((item) => item.status === "sourcing" || item.status === "bidding").length).padStart(2, "0")} detail="Sourcing or bidding" icon={<IconFileInvoice size={16} />} />
         <Metric label="Guard status" value={isFrozen ? "Frozen" : "Healthy"} detail={isFrozen ? "Manual review required" : "Velocity nominal"} icon={<IconShieldCheck size={16} />} alert={isFrozen} />
       </section>
 
@@ -40,15 +41,7 @@ export function OverviewView() {
           <div className="mb-5 flex items-end justify-between"><div><p className="eyebrow">01 / Procurement pipeline</p><h2 className="mt-2 text-2xl font-semibold tracking-[-0.045em]">Orders in flight</h2></div><Link href="/orders" className={buttonVariants({ variant: "ghost", size: "sm" })}>All orders</Link></div>
           <div className="overflow-hidden rounded-2xl border border-foreground/10 bg-card/55 backdrop-blur-xl">
             <div className="hidden grid-cols-[1.1fr_1.7fr_0.8fr_0.8fr_1fr] border-b border-foreground/10 px-5 py-3 text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground md:grid"><span>Order</span><span>Need</span><span>Budget</span><span>Status</span><span className="text-right">Agent</span></div>
-            {pipeline.slice(0, 5).map((item) => (
-              <Link key={item.id} href={`/orders/${item.id}`} className="grid gap-3 border-b border-foreground/8 px-5 py-5 transition-colors last:border-0 hover:bg-accent/25 md:grid-cols-[1.1fr_1.7fr_0.8fr_0.8fr_1fr] md:items-center">
-                <div><span className="font-mono text-xs font-medium">{item.id}</span><span className="mt-1 block text-[11px] text-muted-foreground">Due {item.deadline}</span></div>
-                <div><span className="text-sm font-medium">{item.resource}</span><span className="mt-1 block text-[11px] text-muted-foreground">{item.quantity.toLocaleString()} {item.unit} · {item.destination}</span></div>
-                <span className="font-mono text-xs">${item.maxBudget.toLocaleString()}</span>
-                <span><Badge variant={item.status === "Settled" ? "default" : "secondary"}><IconCircleDot size={10} /> {item.status}</Badge></span>
-                <span className="text-right text-xs text-muted-foreground">{item.supplier}</span>
-              </Link>
-            ))}
+            {orders.length === 0 ? <OrdersEmpty /> : <OrderRows orders={orders.slice(0, 5)} />}
           </div>
         </div>
 
@@ -67,7 +60,7 @@ export function OverviewView() {
       </section>
 
       <section className="editorial-reveal mt-12 grid gap-10 border-t border-foreground/10 pt-10 lg:grid-cols-[1fr_0.85fr]">
-        <div><div className="flex items-end justify-between"><div><p className="eyebrow">04 / Supplier intelligence</p><h2 className="mt-2 text-2xl font-semibold tracking-[-0.045em]">The network gets smarter</h2></div><IconMapPin size={19} className="text-primary" /></div><div className="mt-6 grid gap-3 sm:grid-cols-2">{suppliers.map((s) => <div key={s.name} className="flex items-center justify-between border-b border-foreground/10 py-4"><div><p className="text-sm font-medium">{s.name}</p><p className="mt-1 text-[11px] text-muted-foreground">{s.metric}</p></div><span className="font-mono text-sm text-primary">{s.score}</span></div>)}</div></div>
+        <div><div className="flex items-end justify-between"><div><p className="eyebrow">04 / Supplier intelligence</p><h2 className="mt-2 text-2xl font-semibold tracking-[-0.045em]">Who has bid</h2></div><IconMapPin size={19} className="text-primary" /></div>{suppliers.length === 0 && <p className="mt-6 text-sm text-muted-foreground">No suppliers yet. They appear when a bid is recorded.</p>}<div className="mt-6 grid gap-3 sm:grid-cols-2">{suppliers.slice(0, 4).map((s) => <div key={s.id} className="flex items-center justify-between border-b border-foreground/10 py-4"><div className="min-w-0"><p className="truncate text-sm font-medium">{s.name}</p><p className="mt-1 text-[11px] capitalize text-muted-foreground">{s.verificationStatus}</p></div><span className="font-mono text-sm text-primary">{s.bidCount}</span></div>)}</div></div>
         <div><div className="flex items-end justify-between"><div><p className="eyebrow">05 / Activity stream</p><h2 className="mt-2 text-2xl font-semibold tracking-[-0.045em]">Recent events</h2></div><Link href="/audit" className={buttonVariants({ variant: "ghost", size: "sm" })}>Audit log</Link></div><div className="mt-6 space-y-4">{events.slice(0, 4).map((event) => <div key={event.id} className="flex gap-3"><span className={`mt-0.5 grid size-6 shrink-0 place-items-center rounded-full ${event.level === "error" ? "bg-destructive/10 text-destructive" : "bg-accent text-primary"}`}>{event.level === "success" ? <IconCheck size={13} /> : <IconActivity size={13} />}</span><div className="min-w-0"><p className="truncate text-sm">{event.message}</p><p className="mt-1 truncate font-mono text-[10px] text-muted-foreground">{formatTime(event.timestamp)} · {event.metadata}</p></div></div>)}</div></div>
       </section>
 

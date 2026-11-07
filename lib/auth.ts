@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from "node:crypto"
 import { and, eq, gt } from "drizzle-orm"
 import { cookies } from "next/headers"
+import { redirect } from "next/navigation"
 import { getDb } from "@/lib/db"
 import { memberships, organizations, sessions, users } from "@/lib/db/schema"
 
@@ -59,6 +60,13 @@ export async function getSession(): Promise<Session | null> {
     .where(and(eq(sessions.tokenHash, hashToken(token)), gt(sessions.expiresAt, Date.now())))
     .limit(1)
   return row ?? null
+}
+
+/** For server pages that read org data: the layout's check does not protect a page's own queries. */
+export async function requireSession() {
+  const session = await getSession()
+  if (!session) redirect("/login")
+  return session
 }
 
 export async function destroySession(sessionId: string) {

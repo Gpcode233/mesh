@@ -31,3 +31,29 @@ test("group chat: all six agents answer a real prompt", async ({ page }) => {
   await expect(bubbles).toHaveCount(7)
   await expect(page.getByText(/· error/)).toHaveCount(0)
 })
+
+test("Head Agent: a real model drafts an RFQ, asks for missing details, and creates nothing until approved", async ({ page }) => {
+  await page.goto("/")
+  const send = async (text: string) => {
+    await page.getByPlaceholder("Message Head agent…").fill(text)
+    await page.getByRole("button", { name: /Send/ }).click()
+    await expect(page.getByRole("button", { name: "Thinking" })).toHaveCount(0, { timeout: 90_000 })
+  }
+
+  // Missing budget, deadline and destination: it should ask rather than draft.
+  await send("I want to buy lithium carbonate.")
+  await expect(page.getByTestId("approval-card")).toHaveCount(0)
+  console.log("ASK:", (await page.locator("div.whitespace-pre-wrap").last().innerText()).replace(/\s+/g, " "))
+
+  await send("500 kg, maximum budget $20,000 USD, delivered to Rotterdam by 2099-12-01.")
+  const card = page.getByTestId("approval-card")
+  await expect(card).toBeVisible()
+  console.log("CARD:", (await card.innerText()).replace(/\s+/g, " "))
+  await expect(card).toContainText("Rotterdam")
+  await expect(card).toContainText("$20,000")
+  await page.screenshot({ path: `${shots}/live-rfq.png`, fullPage: true })
+
+  await card.getByRole("button", { name: /Approve/ }).click()
+  await card.getByRole("link", { name: /Open RFQ-/ }).click()
+  await expect(page.getByRole("heading", { level: 1 })).toContainText(/lithium carbonate/i)
+})

@@ -70,7 +70,8 @@ It currently:
 - Calls Google Gemini through the Google AI Studio REST API
 - Uses `gemini-flash-lite-latest` by default (`gemini-2.5-flash` is retired for new keys and `gemini-flash-latest` returned 503 under load). Retries 429/503 with backoff. Do not send `thinkingBudget` — some models reject it.
 - Returns a structured JSON assistant response
-- Tells agents they have no tools and must not claim work was done (a prompt instruction, not a guarantee)
+- Tells agents they must not claim work was done (a prompt instruction, not a guarantee)
+- Offers one tool, `propose_rfq`, to the Head Agent in its direct thread only, on the Google adapter only. It stores a pending approval and never creates an RFQ. Tool arguments are re-validated with `parseRfqDraft` in [lib/rfq.ts](./lib/rfq.ts); invalid ones produce an explanation and no card.
 - Has bounded message/context lengths
 - Does not invent suppliers, quotes, transactions, attestations, or tool results
 - Reports provider failures explicitly
@@ -113,7 +114,11 @@ OpenRouter and Groq remain possible future adapters, but Google AI Studio is the
 
 - Database: Drizzle ORM on libSQL. Local SQLite file at `data/mesh.db` (gitignored); a hosted libSQL URL also works through `DATABASE_URL`.
 - Schema: [lib/db/schema.ts](./lib/db/schema.ts) has every P0 table. Migrations are in `drizzle/`. Money is integer cents.
-- Wired to the app so far: users, memberships, sessions, conversations, messages, audit events, rate limits. Created but unused by the UI: agents, mandates, policies, suppliers, RFQs, bids, orders, milestones, evidence, settlements. Those pages still show simulated in-memory data.
+- Wired to the app: users, memberships, sessions, conversations, messages, approvals, RFQs, suppliers, bids, orders, policies, audit events, rate limits. Created but unused: agents, mandates, milestones, evidence, settlements.
+- Procurement logic lives in [lib/procurement.ts](./lib/procurement.ts). Routes stay thin via `asOperator` in [lib/api.ts](./lib/api.ts).
+- Approving a draft and selecting a supplier each run as one atomic `db.batch`, so racing clicks cannot create two RFQs or two orders (tested).
+- Supplier selection enforces policy server-side: required bid count (distinct suppliers), RFQ budget, per-order limit, owner approval threshold, daily limit. Regions, documents, assets, chains, key expiry and freeze behavior are saved but not enforced yet. The daily-limit check is not atomic with the insert, so two concurrent selections could exceed it slightly.
+- Migration gotcha: when drizzle-kit rebuilds a table it emits `PRAGMA foreign_keys=OFF`, which SQLite ignores inside the migration transaction. Dropping a parent table then cascades deletes to its children. Before running such a migration on real data, back up the database and check the generated SQL.
 - Auth: email and password (scrypt) with hashed, server-side sessions in an httpOnly cookie. No public sign-up. See [lib/auth.ts](./lib/auth.ts).
 - Setup: set `MESH_OPERATOR_EMAIL` and `MESH_OPERATOR_PASSWORD`, then `npm run db:setup`. After a schema change run `npm run db:generate`, then `npm run db:setup`.
 - Login rate limiting is per email, so an attacker can lock an operator out for 15 minutes. Add per-IP limits before exposing this publicly.
@@ -122,11 +127,11 @@ OpenRouter and Groq remain possible future adapters, but Google AI Studio is the
 
 This is not production-ready yet:
 
-- Procurement state (orders, policies, registry) is in browser memory; refresh loses it. Chat and audit are persisted.
+- The agent registry, overview metrics, guard watcher, settlement mix and activity stream are still in-memory simulations.
 - Gemini responses are not streamed.
-- The Head Agent has no real tool calling.
+- The Head Agent's only tool drafts an RFQ. No agent can search suppliers, request bids, or move money.
 - Specialized agents are prompt-routed personas, not independent durable workers.
-- Supplier discovery, quotes, compliance, and evidence are simulated.
+- Bids are entered by operators. There is no supplier discovery, verification, compliance check, or evidence handling.
 - NEAR wallet support is a simplified abstraction.
 - Transaction hashes and Intent routes may be mock/local unless a real endpoint is supplied.
 - There is no deployed procurement contract.
@@ -134,13 +139,15 @@ This is not production-ready yet:
 - One organization and one operator are seeded; there is no invitation, password reset, or multi-org switching.
 - Guard Watcher is an in-memory browser/service primitive, not a persistent server monitor.
 - Orders, policies, registry and audit pages are in-memory/simulated and labelled as such.
-- Only a Playwright e2e suite exists. `npm run test:e2e` uses a throwaway database and a fake provider (`tests/fake-provider.mjs`). `MESH_LIVE=1 npx playwright test tests/live-chat.spec.ts` calls the real provider. No unit or contract tests.
+- Only a Playwright e2e suite exists. `npm run test:e2e` uses a throwaway database and a fake provider (`tests/fake-provider.mjs`). `MESH_LIVE=1 npx playwright test tests/live-chat.spec.ts` calls the real provider. Set `MESH_SKIP_BUILD=1` to reuse an existing build. No unit or contract tests.
 
 Never describe a locally generated hash as a confirmed blockchain transaction.
 
 ## Highest-priority work
 
 ### P0: Make one real vertical slice work
+
+Done so far: natural-language request -> RFQ draft -> approval inside chat -> RFQ -> operator-entered bids -> policy-checked supplier selection -> order -> audit events. Next: NEAR Intent quote onward.
 
 Implement and test:
 
@@ -160,7 +167,7 @@ Start with one organization, one operator, one procurement workflow, and NEAR te
 
 ### P0: Add persistence
 
-Schema exists (see Persistence and auth). Still needed: server-side CRUD and moving the UI onto it for:
+RFQs, bids, orders, suppliers, policies and approvals are done. Still needed for:
 
 - Organizations
 - Users and memberships

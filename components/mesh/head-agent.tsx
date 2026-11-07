@@ -6,6 +6,7 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { AGENT_LIST, AGENTS } from "@/lib/agents"
 import { AgentGroupChat } from "@/components/mesh/agent-group-chat"
+import { ApprovalCard } from "@/components/mesh/approval-card"
 import { useMesh } from "@/components/mesh/mesh-provider"
 import { MessageText } from "@/components/mesh/message-text"
 import { PageHeader, StatusRow } from "@/components/mesh/parts"
@@ -63,7 +64,7 @@ function DirectChat() {
         ))}
       </div>
       <div className="flex items-center justify-between py-4">
-        <div className="flex items-center gap-3"><span className="grid size-9 place-items-center rounded-full bg-foreground text-background"><IconBolt size={17} /></span><div><p className="text-sm font-medium">Mesh / {profile.label}</p><p className="text-[11px] text-muted-foreground">{profile.detail} · prompt-routed persona, no tools</p></div></div>
+        <div className="flex items-center gap-3"><span className="grid size-9 place-items-center rounded-full bg-foreground text-background"><IconBolt size={17} /></span><div><p className="text-sm font-medium">Mesh / {profile.label}</p><p className="text-[11px] text-muted-foreground">{profile.detail} · prompt-routed persona{selectedAgent === "head" ? ", can draft RFQs" : ", no tools"}</p></div></div>
         <Badge variant="outline">PRIVATE</Badge>
       </div>
       <div className="min-h-[280px] flex-1 space-y-5 overflow-y-auto pb-4">
@@ -78,6 +79,7 @@ function DirectChat() {
             <div className={`max-w-[82%] whitespace-pre-wrap rounded-2xl px-4 py-3 text-sm leading-6 ${message.role === "user" ? "rounded-br-md bg-foreground text-background" : message.error ? "rounded-bl-md border border-destructive/30 bg-destructive/10 text-destructive" : "rounded-bl-md bg-accent/55 text-foreground"}`}>
               <div className={`mb-1 text-[10px] uppercase tracking-[0.12em] ${message.role === "user" ? "text-background/60" : message.error ? "text-destructive" : "text-primary"}`}>{message.role === "user" ? "You" : message.error ? "Provider error" : profile.label}</div>
               {message.role === "assistant" && !message.error ? <MessageText text={message.text} /> : message.text}
+              {message.approval && <ApprovalCard approval={message.approval} />}
             </div>
           </div>
         ))}
@@ -110,13 +112,13 @@ function Sidebar() {
       <div className="rounded-2xl bg-[#141b1d] p-5 text-[#ecf3ec]">
         <p className="eyebrow text-[#93a39d]">Agent posture</p>
         <h2 className="mt-3 text-xl font-medium">Bounded autonomy</h2>
-        <p className="mt-3 text-xs leading-5 text-[#93a39d]">Agents only advise and draft here: they have no tools yet, so nothing they say has been executed or checked.</p>
-        <div className="mt-6 space-y-3 text-xs"><StatusRow label="Simulated mandates" value={`${online} / ${registry.length} active`} /><StatusRow label="Tool access" value="None" /><StatusRow label="Conversations" value="Saved" /></div>
+        <p className="mt-3 text-xs leading-5 text-[#93a39d]">Agents advise. The Head Agent can also draft an RFQ, which exists only if you approve it. Nothing else they mention has been executed or checked.</p>
+        <div className="mt-6 space-y-3 text-xs"><StatusRow label="Simulated mandates" value={`${online} / ${registry.length} active`} /><StatusRow label="Agent tools" value="Draft RFQ only" /><StatusRow label="Conversations" value="Saved" /></div>
       </div>
       <div className="glass-panel rounded-2xl p-5">
         <p className="eyebrow">Suggested next moves</p>
         <div className="mt-4 grid gap-3 text-sm">
-          {["Compare the 3 lithium bids", "Explain today's spend velocity", "Audit the latest settlement"].map((item) => <div key={item} className="flex gap-3"><IconSparkles size={16} className="mt-0.5 shrink-0 text-primary" /><span>{item}</span></div>)}
+          {["Tell the Head Agent what to buy", "Approve the draft it shows you", "Record bids on the order page"].map((item) => <div key={item} className="flex gap-3"><IconSparkles size={16} className="mt-0.5 shrink-0 text-primary" /><span>{item}</span></div>)}
         </div>
       </div>
     </aside>

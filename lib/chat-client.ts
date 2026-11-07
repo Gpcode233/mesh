@@ -1,4 +1,5 @@
 import type { AgentId } from "@/lib/agents"
+import type { ApprovalView } from "@/lib/rfq"
 
 export type ChatChannel = "direct" | "group"
 
@@ -9,7 +10,7 @@ export async function requestAgentReply(input: {
   content: string
   clientTurnId: string
   context: string
-}): Promise<string> {
+}): Promise<{ content: string; approval: ApprovalView | null }> {
   const response = await fetch("/api/agent-chat", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -20,9 +21,9 @@ export async function requestAgentReply(input: {
     window.location.assign("/login")
     throw new Error("Your session expired. Sign in again.")
   }
-  const result = (await response.json().catch(() => ({}))) as { content?: string; error?: string }
+  const result = (await response.json().catch(() => ({}))) as { content?: string; approval?: ApprovalView | null; error?: string }
   if (!response.ok || !result.content) throw new Error(result.error ?? "The agent did not respond.")
-  return result.content
+  return { content: result.content, approval: result.approval ?? null }
 }
 
 export function newTurnId() {

@@ -17,7 +17,7 @@ export const AGENTS: Record<AgentId, AgentProfile> = {
     detail: "Orchestration",
     instruction:
       "You are Mesh Head Agent. Orchestrate procurement work, summarize what specialized agents should do, and ask for approval before irreversible actions.",
-    starters: ["Review open RFQs", "What needs my approval?", "Plan a lithium sourcing run"],
+    starters: ["Draft an RFQ: 500 kg lithium carbonate, $20,000 budget, to Rotterdam, by the end of next month", "What do you need from me to draft an RFQ?"],
   },
   scout: {
     id: "scout",

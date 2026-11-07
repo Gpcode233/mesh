@@ -1,10 +1,11 @@
 "use client"
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
-import { parseRfq, type AgentEvent, type RfqRequirement } from "@/lib/agent-engine"
+import type { AgentEvent } from "@/lib/agent-engine"
 import { AGENT_IDS, AGENTS, isAgentId, type AgentId } from "@/lib/agents"
 import { newTurnId, requestAgentReply } from "@/lib/chat-client"
-import { initialPipeline, registrySeed, starterEvents, type PipelineItem, type RegistryAgent } from "@/lib/mesh-data"
+import { registrySeed, starterEvents, type RegistryAgent } from "@/lib/mesh-data"
+import type { ApprovalView } from "@/lib/rfq"
 import { connectWalletProvider, revokeAllAgentKeys, type WalletProvider } from "@/lib/near"
 
 export type ChatMessage = {
@@ -13,6 +14,7 @@ export type ChatMessage = {
   text: string
   agent: AgentId
   error?: boolean
+  approval?: ApprovalView | null
 }
 
 export type GroupMessage = {
@@ -30,13 +32,12 @@ type Contexts = Record<AgentId, string>
 
 export type Operator = { name: string; email: string; role: string; orgName: string }
 
-type StoredMessage = { id: number; channel: string; author: string; content: string }
+type StoredMessage = { id: number; channel: string; author: string; content: string; approval: ApprovalView | null }
 
 type MeshState = {
   operator: Operator
   historyError: string
   signOut: () => Promise<void>
-  pipeline: PipelineItem[]
   events: AgentEvent[]
   registry: RegistryAgent[]
   wallet: WalletProvider | null
@@ -44,7 +45,6 @@ type MeshState = {
   isRevoking: boolean
   toast: string
   isModalOpen: boolean
-  formError: string
   selectedAgent: AgentId
   threads: Threads
   contexts: Contexts
@@ -59,7 +59,7 @@ type MeshState = {
   simulateIntent: () => void
   simulateKeyRotation: () => void
   revokeAgent: (agent: AgentId) => void
-  createPurchaseOrder: (input: Partial<RfqRequirement>) => boolean
+  updateApproval: (approval: ApprovalView) => void
   sendToAgent: (agent: AgentId, text: string) => Promise<void>
   sendToGroup: (text: string) => Promise<void>
   notify: (message: string) => void
@@ -84,11 +84,10 @@ const greeting: ChatMessage = {
   id: "greeting-head",
   role: "assistant",
   agent: "head",
-  text: "I'm the Head Agent. Tell me what you need to buy, or switch to a specialist (Scout, Compliance, Negotiator, Settlement, Guard) — or open the group chat to ask all of us at once. I can't execute purchases from chat yet; I'll flag anything that needs your approval.",
+  text: "I'm the Head Agent. Tell me what you need to buy, with the quantity, budget, deadline and destination, and I'll draft an RFQ for you to approve. Nothing is created until you approve it. You can also ask a specialist directly, or use the group chat to ask all of us at once.",
 }
 
 export function MeshProvider({ children, operator }: { children: ReactNode; operator: Operator }) {
-  const [pipeline, setPipeline] = useState(initialPipeline)
   const [events, setEvents] = useState<AgentEvent[]>(starterEvents)
   const [registry, setRegistry] = useState(registrySeed)
   const [wallet, setWallet] = useState<WalletProvider | null>(null)
@@ -96,7 +95,6 @@ export function MeshProvider({ children, operator }: { children: ReactNode; oper
   const [isRevoking, setRevoking] = useState(false)
   const [toast, setToast] = useState("")
   const [isModalOpen, setModalOpen] = useState(false)
-  const [formError, setFormError] = useState("")
   const [selectedAgent, setSelectedAgent] = useState<AgentId>("head")
   const [threads, setThreads] = useState<Threads>(() => ({ ...emptyRecord<ChatMessage[]>(() => []), head: [greeting] }))
   const [contexts, setContexts] = useState<Contexts>(() => emptyRecord(() => ""))
@@ -138,7 +136,7 @@ export function MeshProvider({ children, operator }: { children: ReactNode; oper
           }
           const agent = row.channel.replace("direct:", "")
           if (!isAgentId(agent)) continue
-          nextThreads[agent].push({ id: `m-${row.id}`, role: isUser ? "user" : "assistant", text: row.content, agent })
+          nextThreads[agent].push({ id: `m-${row.id}`, role: isUser ? "user" : "assistant", text: row.content, agent, approval: row.approval })
         }
         setThreads(nextThreads)
         setGroup(nextGroup)
@@ -208,20 +206,12 @@ export function MeshProvider({ children, operator }: { children: ReactNode; oper
     addEvent("error", `${AGENTS[agent].label} mandate revoked locally (no on-chain revoke yet).`, agent)
   }, [addEvent])
 
-  const createPurchaseOrder = useCallback((input: Partial<RfqRequirement>) => {
-    try {
-      const requirement = parseRfq(input)
-      const id = `RFQ-${1043 + pipeline.length}`
-      setPipeline((current) => [{ ...requirement, id, status: "Sourcing", supplier: "Awaiting agents", spend: 0 }, ...current])
-      addEvent("info", `New RFQ published: ${requirement.resource}`, id)
-      setModalOpen(false)
-      setFormError("")
-      return true
-    } catch (error) {
-      setFormError(error instanceof Error ? error.message : "Unable to publish RFQ.")
-      return false
-    }
-  }, [addEvent, pipeline.length])
+  const updateApproval = useCallback((approval: ApprovalView) => {
+    setThreads((current) => ({
+      ...current,
+      head: current.head.map((message) => (message.approval?.id === approval.id ? { ...message, approval } : message)),
+    }))
+  }, [])
 
   const setAgentContext = useCallback((agent: AgentId, value: string) => {
     setContexts((current) => ({ ...current, [agent]: value }))
@@ -246,7 +236,7 @@ export function MeshProvider({ children, operator }: { children: ReactNode; oper
     setThreads((current) => ({ ...current, [agent]: [...current[agent], { id: nextId("u"), role: "user", text: content, agent }] }))
     try {
       const reply = await requestAgentReply({ agent, channel: "direct", content, clientTurnId: newTurnId(), context: contextsRef.current[agent] })
-      setThreads((current) => ({ ...current, [agent]: [...current[agent], { id: nextId("a"), role: "assistant", text: reply, agent }] }))
+      setThreads((current) => ({ ...current, [agent]: [...current[agent], { id: nextId("a"), role: "assistant", text: reply.content, agent, approval: reply.approval }] }))
     } catch (error) {
       const message = error instanceof Error ? error.message : "The agent could not respond."
       setThreads((current) => ({ ...current, [agent]: [...current[agent], { id: nextId("e"), role: "assistant", text: message, agent, error: true }] }))
@@ -273,7 +263,7 @@ export function MeshProvider({ children, operator }: { children: ReactNode; oper
       let patch: Partial<GroupMessage>
       try {
         const reply = await requestAgentReply({ agent, channel: "group", content, clientTurnId, context: contextsRef.current[agent] })
-        patch = { text: reply, pending: false }
+        patch = { text: reply.content, pending: false }
       } catch (error) {
         patch = { text: error instanceof Error ? error.message : "The agent could not respond.", pending: false, error: true }
       }
@@ -284,9 +274,9 @@ export function MeshProvider({ children, operator }: { children: ReactNode; oper
   }, [])
 
   const value = useMemo<MeshState>(() => ({
-    operator, historyError, signOut, pipeline, events, registry, wallet, isFrozen, isRevoking, toast, isModalOpen, formError, selectedAgent, threads, contexts, pending, group, groupBusy,
-    setModalOpen, setSelectedAgent, setAgentContext, connect, emergencyFreeze, simulateIntent, simulateKeyRotation, revokeAgent, createPurchaseOrder, sendToAgent, sendToGroup, notify,
-  }), [operator, historyError, signOut, pipeline, events, registry, wallet, isFrozen, isRevoking, toast, isModalOpen, formError, selectedAgent, threads, contexts, pending, group, groupBusy, setAgentContext, connect, emergencyFreeze, simulateIntent, simulateKeyRotation, revokeAgent, createPurchaseOrder, sendToAgent, sendToGroup, notify])
+    operator, historyError, signOut, events, registry, wallet, isFrozen, isRevoking, toast, isModalOpen, selectedAgent, threads, contexts, pending, group, groupBusy,
+    setModalOpen, setSelectedAgent, setAgentContext, connect, emergencyFreeze, simulateIntent, simulateKeyRotation, revokeAgent, updateApproval, sendToAgent, sendToGroup, notify,
+  }), [operator, historyError, signOut, events, registry, wallet, isFrozen, isRevoking, toast, isModalOpen, selectedAgent, threads, contexts, pending, group, groupBusy, setAgentContext, connect, emergencyFreeze, simulateIntent, simulateKeyRotation, revokeAgent, updateApproval, sendToAgent, sendToGroup, notify])
 
   return <MeshContext.Provider value={value}>{children}</MeshContext.Provider>
 }

@@ -120,23 +120,3 @@ test("agent chats and failures reach the persistent audit log, without message c
   const { events } = await (await page.request.get("/api/audit")).json()
   expect(JSON.stringify(events)).not.toContain("FAIL_PROVIDER")
 })
-
-test("order detail shows lifecycle timeline", async ({ page }) => {
-  await page.goto("/orders/RFQ-1042")
-  await expect(page.getByRole("heading", { name: "Lithium carbonate" })).toBeVisible()
-  await expect(page.getByText("Intent submitted")).toBeVisible()
-})
-
-test("creating a purchase order adds it to orders", async ({ page }) => {
-  await page.goto("/overview")
-  await page.getByRole("button", { name: /New purchase order/ }).first().click()
-  await page.getByLabel("Resource need").fill("Steel plate")
-  await page.getByLabel("Quantity").fill("10")
-  await page.getByLabel("Unit").fill("t")
-  await page.getByLabel("Max budget (USDC)").fill("5000")
-  await page.getByLabel("Deadline").fill("2026-12-01")
-  await page.getByLabel("Destination").fill("Hamburg hub")
-  await page.getByRole("button", { name: /Publish to agent network/ }).click()
-  await page.getByRole("link", { name: "Orders", exact: true }).first().click()
-  await expect(page.getByRole("link", { name: /Steel plate/ })).toBeVisible()
-})
