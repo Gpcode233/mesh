@@ -57,3 +57,52 @@ test("Head Agent: a real model drafts an RFQ, asks for missing details, and crea
   await card.getByRole("link", { name: /Open RFQ-/ }).click()
   await expect(page.getByRole("heading", { level: 1 })).toContainText(/lithium carbonate/i)
 })
+
+// Real model and, when MESH_SEARCH_API_KEY is set in .env, real web search.
+test.describe("Scout with a real model", () => {
+  const ask = async (page: import("@playwright/test").Page, text: string) => {
+    await page.getByPlaceholder("Message Scout…").fill(text)
+    await page.getByRole("button", { name: /Send/ }).click()
+    await expect(page.getByRole("button", { name: "Thinking" })).toHaveCount(0, { timeout: 120_000 })
+    const reply = page.locator("div.whitespace-pre-wrap").last()
+    console.log("SCOUT:", (await reply.innerText()).replace(/\s+/g, " "))
+    return reply
+  }
+
+  test("searches the web and cites what it found", async ({ page }) => {
+    await page.goto("/")
+    await page.getByRole("button", { name: /^Scout/ }).first().click()
+    const reply = await ask(page, "Find ISO 9001 certified steel bolt manufacturers in Germany. List up to three with their source links.")
+    await expect(page.getByText("Provider error")).toHaveCount(0)
+    const steps = page.getByTestId("tool-steps").last()
+    await steps.getByRole("button").click()
+    await expect(steps).toContainText("Search the web")
+    await expect(reply).toContainText("http")
+    await expect(page.getByTestId("approval-card")).toHaveCount(0)
+
+    // A follow-up can propose from the results stored on the previous reply, without searching again.
+    await ask(page, "Propose the first one for our supplier network.")
+    const card = page.getByTestId("approval-card").last()
+    await expect(card).toBeVisible()
+    console.log("FOLLOW-UP CARD:", (await card.innerText()).replace(/\s+/g, " "))
+    await page.screenshot({ path: `${shots}/live-scout-followup.png`, fullPage: true })
+  })
+
+  test("searches and proposes one supplier in a single request, and nothing is saved before approval", async ({ page }) => {
+    await page.goto("/")
+    await page.getByRole("button", { name: /^Scout/ }).first().click()
+    await ask(page, "Search for an ISO 9001 certified steel bolt manufacturer in Germany and propose the best match for our supplier network.")
+    await expect(page.getByText("Provider error")).toHaveCount(0)
+    const card = page.getByTestId("approval-card").last()
+    await expect(card).toBeVisible()
+    console.log("CARD:", (await card.innerText()).replace(/\s+/g, " "))
+    const href = await card.getByRole("link").first().getAttribute("href")
+    console.log("SOURCE:", href)
+    expect(href).toMatch(/^https?:\/\//)
+    await page.screenshot({ path: `${shots}/live-scout-card.png`, fullPage: true })
+
+    const name = (/Add supplier: (.+)/.exec(await card.innerText())?.[1] ?? "").split("\n")[0].trim()
+    await page.goto("/suppliers")
+    await expect(page.getByRole("heading", { name, exact: true })).toHaveCount(0)
+  })
+})

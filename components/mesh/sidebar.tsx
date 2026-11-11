@@ -20,7 +20,7 @@ import { Button } from "@/components/ui/button"
 import { useMesh } from "@/components/mesh/mesh-provider"
 
 export const NAV_ITEMS: Array<{ href: string; label: string; icon: ReactNode; badge?: string }> = [
-  { href: "/", label: "Head agent", icon: <IconMessageCircle size={17} />, badge: "CHAT" },
+  { href: "/", label: "Chat", icon: <IconMessageCircle size={17} /> },
   { href: "/overview", label: "Overview", icon: <IconLayoutDashboard size={17} /> },
   { href: "/orders", label: "Orders", icon: <IconFileInvoice size={17} /> },
   { href: "/agents", label: "Agents", icon: <IconRobot size={17} /> },
@@ -60,7 +60,7 @@ export function Sidebar() {
         </nav>
       </div>
       <div className="mt-auto border-t border-foreground/10 pt-4">
-        <div className="mb-4 flex items-center gap-2 px-3 text-[11px] text-muted-foreground"><span className="size-1.5 rounded-full bg-[#39a96b]" /> NEAR testnet (mock wallet)</div>
+        <div className="mb-4 flex items-center gap-2 px-3 text-[11px] text-muted-foreground"><span className="size-1.5 rounded-full bg-[#39a96b]" /> NEAR testnet · Meteor wallet</div>
         <Button variant="outline" size="sm" className="w-full justify-start" onClick={connect}><IconWallet size={15} />{wallet?.accountId ? "Wallet connected" : "Connect wallet"}</Button>
         <div className="mt-3 flex items-center justify-between gap-2 px-3">
           <span className="min-w-0"><span className="block truncate text-xs font-medium">{operator.name}</span><span className="block truncate text-[10px] capitalize text-muted-foreground">{operator.role} · {operator.orgName}</span></span>

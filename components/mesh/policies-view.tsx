@@ -50,7 +50,7 @@ export function PoliciesView({ policy, canEdit }: { policy: PolicyView; canEdit:
     }
   }
 
-  const field = (label: string, name: keyof PolicyView, type: "number" | "text" = "text") => {
+  const field = (label: string, name: Exclude<keyof PolicyView, "frozenAt">, type: "number" | "text" = "text") => {
     const value = policy[name]
     return (
       <label className="grid gap-2 text-xs font-medium text-muted-foreground">{label}
@@ -62,7 +62,7 @@ export function PoliciesView({ policy, canEdit }: { policy: PolicyView; canEdit:
   return (
     <div className="mx-auto max-w-[900px] px-3 pb-16 pt-10 lg:px-6 lg:pt-14">
       <PageHeader eyebrow="Policy center" title="Set the rules" muted="agents can't break.">Limits are checked on the server every time a supplier is selected.</PageHeader>
-      <SimulatedNote>Enforced today: daily limit, per-order limit, approval threshold, required bids. Saved but not enforced yet: regions, documents, assets, chains, key expiration, freeze behavior. Nothing is enforced on-chain.</SimulatedNote>
+      <SimulatedNote>Enforced by the server when a supplier is selected: daily limit, per-order limit, approval threshold, required bids, supplier region, required documents (marked on file by an operator, not verified), and the settlement asset and chain (Mesh settles in NEAR on NEAR, so both must be approved). The freeze switch is on the Overview. Not enforced yet: key expiration applies to the on-chain agent mandate, which the app does not issue yet; the freeze behavior text is descriptive. Nothing is enforced on-chain.</SimulatedNote>
       <form onSubmit={save} className="glass-panel mt-6 grid gap-5 rounded-2xl p-6 md:grid-cols-2">
         {field("Daily company spend limit (USD)", "dailySpendLimit", "number")}
         {field("Per-order limit (USD)", "perOrderLimit", "number")}

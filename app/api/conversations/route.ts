@@ -17,6 +17,7 @@ export async function GET() {
       content: messages.content,
       clientTurnId: messages.clientTurnId,
       approvalId: messages.approvalId,
+      steps: messages.steps,
     })
     .from(messages)
     .innerJoin(conversations, eq(conversations.id, messages.conversationId))
@@ -25,6 +26,6 @@ export async function GET() {
 
   const approvals = await getApprovalViews(session.orgId, rows.flatMap((row) => (row.approvalId ? [row.approvalId] : [])))
   return Response.json({
-    messages: rows.map(({ approvalId, ...row }) => ({ ...row, approval: (approvalId && approvals.get(approvalId)) || null })),
+    messages: rows.map(({ approvalId, steps, ...row }) => ({ ...row, steps: steps ?? [], approval: (approvalId && approvals.get(approvalId)) || null })),
   })
 }

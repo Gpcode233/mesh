@@ -23,7 +23,7 @@ export function AuditLog() {
 
   return (
     <div className="mx-auto max-w-[900px] px-3 pb-16 pt-10 lg:px-6 lg:pt-14">
-      <PageHeader eyebrow="Audit log" title="Everything" muted="on the record.">Sign-ins and agent chats are recorded in the database. Newest first.</PageHeader>
+      <PageHeader eyebrow="Audit log" title="Everything" muted="on the record.">Sign-ins, agent chats, agent tool calls, approvals, RFQs, bids, supplier selections and policy changes are recorded in the database, without message content. Newest first.</PageHeader>
       <h2 className="mt-8 text-lg font-semibold tracking-tight">Recorded events</h2>
       {error && <p role="alert" className="mt-3 text-sm text-destructive">{error}</p>}
       {!error && recorded === null && <p className="mt-3 text-sm text-muted-foreground">Loading…</p>}
@@ -39,7 +39,7 @@ export function AuditLog() {
         </div>
       )}
       <h2 className="mt-10 text-lg font-semibold tracking-tight">Simulated session events</h2>
-      <SimulatedNote>In-memory only: a refresh clears these. Procurement actions are not recorded server-side yet.</SimulatedNote>
+      <SimulatedNote>In-memory only: a refresh clears these. They are browser-side demo telemetry, not recorded actions.</SimulatedNote>
       <div className="mt-4 overflow-hidden rounded-2xl border border-foreground/10 bg-card/55">
         {events.map((event) => (
           <div key={event.id} className="flex gap-3 border-b border-foreground/8 px-5 py-4 last:border-0">

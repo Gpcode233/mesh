@@ -1,19 +1,26 @@
-import { and, desc, eq, gte, inArray, ne, sql, sum } from "drizzle-orm"
+import { and, asc, desc, eq, gte, inArray, ne, or, sql, sum } from "drizzle-orm"
 import { recordAudit } from "@/lib/audit"
 import type { Session } from "@/lib/auth"
 import { getDb } from "@/lib/db"
-import { approvals, bids, orders, policies, rfqs, suppliers } from "@/lib/db/schema"
+import { approvals, auditEvents, bids, orders, policies, rfqs, settlements, suppliers, users } from "@/lib/db/schema"
 import {
   isPositiveAmount,
+  listIncludes,
+  missingDocuments,
   parseRfqDraft,
+  regionAllowed,
+  SETTLEMENT_ROUTE,
   usd,
   type ApprovalStatus,
   type ApprovalView,
   type BidView,
   type OrderDetailView,
+  type OrderEventView,
   type OrderRow,
   type PolicyView,
   type RfqDraft,
+  type SettlementSummary,
+  type SupplierCandidate,
   type SupplierView,
 } from "@/lib/rfq"
 
@@ -68,11 +75,14 @@ export async function getOrderDetail(orgId: string, id: string): Promise<OrderDe
   const bidRows: BidView[] = await db
     .select({
       id: bids.id,
+      supplierId: suppliers.id,
       supplier: suppliers.name,
       region: suppliers.region,
+      nearAccountId: suppliers.nearAccountId,
       amountCents: bids.amountCents,
       leadTimeDays: bids.leadTimeDays,
       status: bids.status,
+      documents: suppliers.documents,
     })
     .from(bids)
     .innerJoin(suppliers, eq(suppliers.id, bids.supplierId))
@@ -80,6 +90,15 @@ export async function getOrderDetail(orgId: string, id: string): Promise<OrderDe
     .orderBy(bids.amountCents)
   const [order] = await db.select({ status: orders.status }).from(orders).where(eq(orders.rfqId, id))
   const policy = await loadPolicy(orgId)
+  const selected = bidRows.find((bid) => bid.status === "selected")
+  let escrow: Awaited<ReturnType<typeof import("./settlement").getEscrowViewForOrder>> = null
+  try {
+    const mod = await import("./settlement")
+    escrow = await mod.getEscrowViewForOrder(orgId, id)
+  } catch (error) {
+    console.error("Escrow view failed", error)
+    escrow = null
+  }
   return {
     id: row.id,
     resource: row.resource,
@@ -90,10 +109,105 @@ export async function getOrderDetail(orgId: string, id: string): Promise<OrderDe
     destination: row.destination,
     status: row.status,
     bidCount: bidRows.length,
-    supplier: bidRows.find((bid) => bid.status === "selected")?.supplier ?? null,
+    supplier: selected?.supplier ?? null,
     bids: bidRows,
     requiredBidCount: policy.requiredBidCount,
+    approvedRegions: policy.approvedRegions,
+    requiredDocuments: policy.requiredDocuments,
+    frozen: policy.frozenAt !== null,
     orderStatus: order?.status ?? null,
+    awardedCents: selected?.amountCents ?? null,
+    createdAt: row.createdAt,
+    events: await orderEvents(orgId, id, bidRows),
+    escrow,
+  }
+}
+
+/**
+ * The RFQ's history, read from the audit log: its creation (and the agent draft behind it), each bid,
+ * each refused selection and the award. Labels are derived here; audit metadata holds no message text.
+ */
+async function orderEvents(orgId: string, rfqId: string, bidRows: BidView[]): Promise<OrderEventView[]> {
+  const db = getDb()
+  const select = { id: auditEvents.id, action: auditEvents.action, target: auditEvents.target, metadata: auditEvents.metadata, createdAt: auditEvents.createdAt, actor: users.name }
+  const rows = await db.select(select).from(auditEvents)
+    .leftJoin(users, eq(users.id, auditEvents.actorUserId))
+    .where(and(eq(auditEvents.orgId, orgId), or(eq(auditEvents.target, rfqId), sql`json_extract(${auditEvents.metadata}, '$.rfqId') = ${rfqId}`)))
+    .orderBy(asc(auditEvents.id))
+  const approvalId = rows.find((row) => row.action === "rfq.created")?.metadata?.approvalId
+  const drafted = typeof approvalId === "string"
+    ? await db.select(select).from(auditEvents).leftJoin(users, eq(users.id, auditEvents.actorUserId))
+      .where(and(eq(auditEvents.orgId, orgId), eq(auditEvents.target, approvalId), eq(auditEvents.action, "approval.requested")))
+    : []
+
+  const bidLabel = (bidId: unknown) => {
+    const bid = bidRows.find((entry) => entry.id === bidId)
+    return bid ? `${bid.supplier} · ${usd(bid.amountCents)}` : null
+  }
+  const describe = (row: (typeof rows)[number]): Pick<OrderEventView, "label" | "detail"> => {
+    const meta = row.metadata ?? {}
+    switch (row.action) {
+      case "approval.requested": return { label: "Head Agent drafted this RFQ", detail: "Sent for human approval" }
+      case "rfq.created": return { label: "RFQ created", detail: meta.source === "approval" ? "Approved from the agent's draft" : "Entered with the purchase order form" }
+      case "bid.recorded": return { label: "Bid recorded", detail: bidLabel(row.target) }
+      case "order.blocked": return { label: "Selection refused by policy", detail: typeof meta.reason === "string" ? meta.reason : null }
+      case "order.approved": return { label: "Supplier selected, order created", detail: bidLabel(meta.bidId) }
+      case "order.funded": return { label: "Escrow funded on-chain", detail: typeof meta.txHash === "string" ? `Tx ${meta.txHash.slice(0, 10)}…` : null }
+      case "milestone.released": return { label: "Milestone paid on-chain", detail: typeof meta.txHash === "string" ? `Tx ${meta.txHash.slice(0, 10)}…` : `Milestone ${(meta.position as number) + 1}` }
+      case "milestone.release_failed": return { label: "Milestone release failed", detail: typeof meta.error === "string" ? meta.error : null }
+      case "supplier.near_account_set": return { label: "Supplier NEAR account set", detail: typeof meta.nearAccountId === "string" ? meta.nearAccountId : null }
+      default: return { label: row.action, detail: null }
+    }
+  }
+  return [...drafted, ...rows].map((row) => ({ id: row.id, action: row.action, actor: row.actor, at: row.createdAt, ...describe(row) }))
+}
+
+function utcMidnight() {
+  const midnight = new Date()
+  midnight.setUTCHours(0, 0, 0, 0)
+  return midnight.getTime()
+}
+
+/** Cents committed by non-cancelled orders created since UTC midnight: what the daily limit counts. */
+async function committedTodayCents(orgId: string) {
+  const [{ spent }] = await getDb()
+    .select({ spent: sum(bids.amountCents) })
+    .from(orders)
+    .innerJoin(bids, eq(bids.id, orders.bidId))
+    .where(and(eq(orders.orgId, orgId), gte(orders.createdAt, utcMidnight()), ne(orders.status, "cancelled")))
+  return Number(spent ?? 0)
+}
+
+export async function getSettlementSummary(orgId: string): Promise<SettlementSummary> {
+  const db = getDb()
+  const [policy, committed, awarded, confirmed] = await Promise.all([
+    loadPolicy(orgId),
+    committedTodayCents(orgId),
+    db.select({ rfqId: rfqs.id, resource: rfqs.resource, supplier: suppliers.name, amountCents: bids.amountCents, approvedAt: orders.createdAt, orderId: orders.id })
+      .from(orders)
+      .innerJoin(rfqs, eq(rfqs.id, orders.rfqId))
+      .innerJoin(bids, eq(bids.id, orders.bidId))
+      .innerJoin(suppliers, eq(suppliers.id, bids.supplierId))
+      .where(and(eq(orders.orgId, orgId), ne(orders.status, "cancelled")))
+      .orderBy(desc(orders.createdAt)),
+    db.select({ orderId: settlements.orderId, kind: settlements.kind, amountYocto: settlements.amountYocto })
+      .from(settlements)
+      .where(and(eq(settlements.orgId, orgId), eq(settlements.status, "confirmed"))),
+  ])
+  const payouts = confirmed.filter((row) => row.kind === "milestone_payout")
+  const funded = confirmed.filter((row) => row.kind === "escrow_funding")
+  const yocto = (rows: typeof confirmed) => rows.reduce((total, row) => total + BigInt(row.amountYocto ?? "0"), BigInt(0)).toString()
+  const settled = new Set(funded.map((row) => row.orderId))
+  return {
+    committedTodayCents: committed,
+    dailyLimitCents: policy.dailySpendLimit * 100,
+    awardedCents: awarded.reduce((total, row) => total + row.amountCents, 0),
+    awardedCount: awarded.length,
+    paidYocto: yocto(payouts),
+    paidCount: payouts.length,
+    escrowedYocto: yocto(funded),
+    escrowedCount: funded.length,
+    awaiting: awarded.filter((row) => !settled.has(row.orderId)).map((row) => ({ rfqId: row.rfqId, resource: row.resource, supplier: row.supplier, amountCents: row.amountCents, approvedAt: row.approvedAt })),
   }
 }
 
@@ -103,6 +217,8 @@ export async function listSuppliers(orgId: string): Promise<SupplierView[]> {
       id: suppliers.id,
       name: suppliers.name,
       region: suppliers.region,
+      nearAccountId: suppliers.nearAccountId,
+      sourceUrl: suppliers.sourceUrl,
       verificationStatus: suppliers.verificationStatus,
       bidCount: sql<number>`(SELECT count(*) FROM ${bids} WHERE ${bids.supplierId} = ${suppliers.id})`,
     })
@@ -138,8 +254,11 @@ export async function createRfq(session: Session, input: unknown) {
 
 // --- Approvals ---
 
-function toApprovalView(row: { id: string; status: ApprovalStatus; payload: unknown; resultId: string | null }): ApprovalView {
-  return { id: row.id, status: row.status, draft: row.payload as RfqDraft, resultId: row.resultId }
+function toApprovalView(row: { id: string; kind: "create_rfq" | "add_supplier"; status: ApprovalStatus; payload: unknown; resultId: string | null }): ApprovalView {
+  const base = { id: row.id, status: row.status, resultId: row.resultId }
+  return row.kind === "add_supplier"
+    ? { ...base, kind: "add_supplier", supplier: row.payload as SupplierCandidate }
+    : { ...base, kind: "create_rfq", draft: row.payload as RfqDraft }
 }
 
 export async function getApprovalViews(orgId: string, ids: string[]) {
@@ -153,6 +272,7 @@ export async function getApprovalViews(orgId: string, ids: string[]) {
  * It deliberately writes no RFQ, so model output cannot create one.
  */
 export async function proposeRfq(session: Session, agent: string, draft: RfqDraft) {
+  if ((await loadPolicy(session.orgId)).frozenAt !== null) throw new DomainError(FROZEN, 423)
   const [row] = await getDb().insert(approvals).values({
     orgId: session.orgId,
     kind: "create_rfq",
@@ -161,6 +281,28 @@ export async function proposeRfq(session: Session, agent: string, draft: RfqDraf
     payload: draft,
   }).returning()
   await recordAudit({ ...auditFor(session), action: "approval.requested", target: row.id, metadata: { kind: "create_rfq", agent } })
+  return toApprovalView(row)
+}
+
+/**
+ * Scout's only write: store a supplier it found on the web for a human to decide on.
+ * It deliberately writes no supplier, so model output cannot add one.
+ */
+export async function proposeSupplier(session: Session, agent: string, candidate: SupplierCandidate) {
+  const db = getDb()
+  const [existing] = await db
+    .select({ id: suppliers.id })
+    .from(suppliers)
+    .where(and(eq(suppliers.orgId, session.orgId), sql`lower(${suppliers.name}) = lower(${candidate.name})`))
+  if (existing) throw new DomainError(`${candidate.name} is already in the supplier network.`, 409)
+  const [row] = await db.insert(approvals).values({
+    orgId: session.orgId,
+    kind: "add_supplier",
+    requestedByAgent: agent,
+    requestedByUserId: session.userId,
+    payload: candidate,
+  }).returning()
+  await recordAudit({ ...auditFor(session), action: "approval.requested", target: row.id, metadata: { kind: "add_supplier", agent } })
   return toApprovalView(row)
 }
 
@@ -179,9 +321,34 @@ export async function decideApproval(session: Session, id: string, decision: "ap
     return toApprovalView(row)
   }
 
+  if (approval.kind === "add_supplier") {
+    const candidate = approval.payload as SupplierCandidate
+    const supplierId = crypto.randomUUID()
+    let updated
+    try {
+      // Same pattern as RFQs: the insert happens only while the approval is still pending, in one batch.
+      ;[, updated] = await db.batch([
+        db.run(sql`
+          INSERT INTO suppliers (id, org_id, name, region, source_url, verification_status, documents, created_at)
+          SELECT ${supplierId}, ${session.orgId}, ${candidate.name}, ${candidate.region}, ${candidate.sourceUrl}, 'unverified', '[]', ${Date.now()}
+          WHERE EXISTS (SELECT 1 FROM approvals WHERE id = ${id} AND status = 'pending')
+        `),
+        db.update(approvals).set({ ...decided, status: "approved", resultId: supplierId }).where(stillPending).returning(),
+      ])
+    } catch (error) {
+      if (isUniqueViolation(error)) throw new DomainError(`${candidate.name} is already in the supplier network. Reject this card.`, 409)
+      throw error
+    }
+    const [row] = updated
+    if (!row) throw new DomainError("This request was already decided.", 409)
+    await recordAudit({ ...auditFor(session), action: "supplier.added", target: supplierId, metadata: { source: "discovery", approvalId: id, agent: approval.requestedByAgent } })
+    return toApprovalView(row)
+  }
+
   // Re-validate at decision time: the deadline may have passed since the draft was made.
   const parsed = parseRfqDraft(approval.payload)
   if (!parsed.ok) throw new DomainError(`This draft can no longer be approved: ${parsed.error}`, 422)
+  if ((await loadPolicy(session.orgId)).frozenAt !== null) throw new DomainError(FROZEN, 423)
 
   // One atomic batch, with the insert conditional on the approval still being pending,
   // so concurrent approve/approve or approve/reject cannot create an RFQ twice or after a rejection.
@@ -193,11 +360,16 @@ export async function decideApproval(session: Session, id: string, decision: "ap
       SELECT ${rfqId}, ${values.orgId}, ${values.createdByUserId}, ${values.resource}, ${values.quantity}, ${values.unit},
              ${values.maxBudgetCents}, ${values.deadline}, ${values.destination}, ${values.status}, ${Date.now()}
       WHERE EXISTS (SELECT 1 FROM approvals WHERE id = ${id} AND status = 'pending')
+        AND ${notFrozen(session.orgId)}
     `),
-    db.update(approvals).set({ ...decided, status: "approved", resultId: rfqId }).where(stillPending).returning(),
+    db.update(approvals).set({ ...decided, status: "approved", resultId: rfqId }).where(and(stillPending, notFrozen(session.orgId))).returning(),
   ])
   const [row] = updated
-  if (!row) throw new DomainError("This request was already decided.", 409)
+  if (!row) {
+    // A freeze that landed between the check and the batch leaves the approval pending.
+    if ((await loadPolicy(session.orgId)).frozenAt !== null) throw new DomainError(FROZEN, 423)
+    throw new DomainError("This request was already decided.", 409)
+  }
   await recordAudit({ ...auditFor(session), action: "rfq.created", target: rfqId, metadata: { source: "approval", approvalId: id, agent: approval.requestedByAgent } })
   return toApprovalView(row)
 }
@@ -214,6 +386,7 @@ export async function recordBid(session: Session, rfqId: string, input: unknown)
     throw new DomainError("Lead time must be a whole number of days.", 400)
   }
   const region = typeof value.region === "string" && value.region.trim() ? value.region.trim().slice(0, 100) : null
+  const documents = value.documents === undefined || value.documents === null ? [] : stringList(value.documents, "Documents")
 
   const db = getDb()
   const [rfq] = await db.select().from(rfqs).where(and(eq(rfqs.orgId, session.orgId), eq(rfqs.id, rfqId)))
@@ -222,6 +395,12 @@ export async function recordBid(session: Session, rfqId: string, input: unknown)
 
   await db.insert(suppliers).values({ orgId: session.orgId, name: supplierName, region }).onConflictDoNothing()
   const [supplier] = await db.select().from(suppliers).where(and(eq(suppliers.orgId, session.orgId), eq(suppliers.name, supplierName)))
+  // Fill in what the supplier record lacks; never overwrite a recorded region or drop a document.
+  const added: string[] = []
+  for (const document of documents) if (!listIncludes([...supplier.documents, ...added], document)) added.push(document)
+  if (added.length || (region && !supplier.region)) {
+    await db.update(suppliers).set({ documents: [...supplier.documents, ...added], region: supplier.region ?? region }).where(eq(suppliers.id, supplier.id))
+  }
 
   try {
     const bidId = crypto.randomUUID()
@@ -236,7 +415,7 @@ export async function recordBid(session: Session, rfqId: string, input: unknown)
       }),
       db.update(rfqs).set({ status: "bidding" }).where(and(eq(rfqs.id, rfqId), eq(rfqs.status, "sourcing"))),
     ])
-    await recordAudit({ ...auditFor(session), action: "bid.recorded", target: bidId, metadata: { rfqId, source: "operator" } })
+    await recordAudit({ ...auditFor(session), action: "bid.recorded", target: bidId, metadata: { rfqId, source: "operator", ...(added.length ? { documentsMarkedOnFile: added } : {}) } })
     return bidId
   } catch (error) {
     if (isUniqueViolation(error)) throw new DomainError(`${supplierName} already has a bid on this RFQ.`, 409)
@@ -244,7 +423,59 @@ export async function recordBid(session: Session, rfqId: string, input: unknown)
   }
 }
 
-/** Selecting a supplier is the human approval step. Policy is enforced here, not in the UI. */
+const FROZEN = "Procurement is frozen. An owner must unfreeze it first."
+
+/** SQL condition: the organization's procurement is not frozen. */
+const notFrozen = (orgId: string) => sql`NOT EXISTS (SELECT 1 FROM policies WHERE org_id = ${orgId} AND frozen_at IS NOT NULL)`
+
+type Refusal = { reason: string; status: number }
+
+/** Every policy rule for a selection, in the order they are reported. Null means the selection is allowed. */
+function policyRefusal(input: {
+  policy: PolicyView
+  role: string
+  budgetCents: number
+  bidCount: number
+  amountCents: number
+  supplier: { name: string; region: string | null; documents: string[] }
+  committedCents: number
+}): Refusal | null {
+  const { policy, amountCents, supplier } = input
+  const list = (values: string[]) => values.join(", ") || "none"
+  if (policy.frozenAt !== null) return { reason: FROZEN, status: 423 }
+  if (input.bidCount < policy.requiredBidCount) return { reason: `Policy requires ${policy.requiredBidCount} bids; this RFQ has ${input.bidCount}.`, status: 422 }
+  if (amountCents > input.budgetCents) return { reason: `This bid (${usd(amountCents)}) is over the RFQ budget (${usd(input.budgetCents)}).`, status: 422 }
+  if (!regionAllowed(policy.approvedRegions, supplier.region)) {
+    return {
+      reason: supplier.region
+        ? `${supplier.name} is in ${supplier.region}, which is not an approved region (${list(policy.approvedRegions)}).`
+        : `${supplier.name} has no region on record; policy allows only ${list(policy.approvedRegions)}.`,
+      status: 422,
+    }
+  }
+  const missing = missingDocuments(policy.requiredDocuments, supplier.documents)
+  if (missing.length) return { reason: `${supplier.name} is missing required documents: ${missing.join(", ")}.`, status: 422 }
+  if (!listIncludes(policy.approvedAssets, SETTLEMENT_ROUTE.asset) || !listIncludes(policy.approvedChains, SETTLEMENT_ROUTE.chain)) {
+    return {
+      reason: `Mesh settles in ${SETTLEMENT_ROUTE.asset} on ${SETTLEMENT_ROUTE.chain}, which policy does not approve (assets: ${list(policy.approvedAssets)}; chains: ${list(policy.approvedChains)}).`,
+      status: 422,
+    }
+  }
+  if (amountCents > policy.perOrderLimit * 100) return { reason: `This bid (${usd(amountCents)}) is over the per-order limit (${usd(policy.perOrderLimit * 100)}).`, status: 422 }
+  if (amountCents > policy.approvalThreshold * 100 && input.role !== "owner") {
+    return { reason: `Bids over ${usd(policy.approvalThreshold * 100)} need an owner to approve.`, status: 403 }
+  }
+  if (input.committedCents + amountCents > policy.dailySpendLimit * 100) {
+    return { reason: `This would commit ${usd(input.committedCents + amountCents)} today, over the daily limit (${usd(policy.dailySpendLimit * 100)}).`, status: 422 }
+  }
+  return null
+}
+
+/**
+ * Selecting a supplier is the human approval step. Policy is enforced here, not in the UI.
+ * The freeze, spend limits and daily total are checked again inside the insert itself, so concurrent
+ * selections or a concurrent freeze or policy change cannot push an order past them.
+ */
 export async function selectBid(session: Session, rfqId: string, bidId: string) {
   const db = getDb()
   const [rfq] = await db.select().from(rfqs).where(and(eq(rfqs.orgId, session.orgId), eq(rfqs.id, rfqId)))
@@ -254,46 +485,76 @@ export async function selectBid(session: Session, rfqId: string, bidId: string) 
   const rfqBids = await db.select().from(bids).where(and(eq(bids.orgId, session.orgId), eq(bids.rfqId, rfqId)))
   const bid = rfqBids.find((entry) => entry.id === bidId)
   if (!bid) throw new DomainError("Bid not found on this RFQ.", 404)
+  const [supplier] = await db.select().from(suppliers).where(eq(suppliers.id, bid.supplierId))
 
-  const policy = await loadPolicy(session.orgId)
-  const refuse = async (reason: string, status = 422): Promise<never> => {
+  const check = async () => policyRefusal({
+    policy: await loadPolicy(session.orgId),
+    role: session.role,
+    budgetCents: rfq.maxBudgetCents,
+    bidCount: rfqBids.length,
+    amountCents: bid.amountCents,
+    supplier,
+    committedCents: await committedTodayCents(session.orgId),
+  })
+  const refuse = async ({ reason, status }: Refusal): Promise<never> => {
     await recordAudit({ ...auditFor(session), action: "order.blocked", target: rfqId, metadata: { bidId, reason } })
     throw new DomainError(reason, status)
   }
-  if (rfqBids.length < policy.requiredBidCount) await refuse(`Policy requires ${policy.requiredBidCount} bids; this RFQ has ${rfqBids.length}.`)
-  if (bid.amountCents > rfq.maxBudgetCents) await refuse(`This bid (${usd(bid.amountCents)}) is over the RFQ budget (${usd(rfq.maxBudgetCents)}).`)
-  if (bid.amountCents > policy.perOrderLimit * 100) await refuse(`This bid (${usd(bid.amountCents)}) is over the per-order limit (${usd(policy.perOrderLimit * 100)}).`)
-  if (bid.amountCents > policy.approvalThreshold * 100 && session.role !== "owner") {
-    await refuse(`Bids over ${usd(policy.approvalThreshold * 100)} need an owner to approve.`, 403)
-  }
-
-  const midnight = new Date()
-  midnight.setUTCHours(0, 0, 0, 0)
-  const [{ spent }] = await db
-    .select({ spent: sum(bids.amountCents) })
-    .from(orders)
-    .innerJoin(bids, eq(bids.id, orders.bidId))
-    .where(and(eq(orders.orgId, session.orgId), gte(orders.createdAt, midnight.getTime()), ne(orders.status, "cancelled")))
-  const committed = Number(spent ?? 0)
-  if (committed + bid.amountCents > policy.dailySpendLimit * 100) {
-    await refuse(`This would commit ${usd(committed + bid.amountCents)} today, over the daily limit (${usd(policy.dailySpendLimit * 100)}).`)
-  }
+  const refusal = await check()
+  if (refusal) await refuse(refusal)
 
   try {
     const orderId = crypto.randomUUID()
-    // Atomic: the unique index on orders.rfq_id rolls everything back if another selection won.
-    await db.batch([
-      db.insert(orders).values({ id: orderId, orgId: session.orgId, rfqId, bidId, approvedByUserId: session.userId, status: "approved" }),
-      db.update(bids).set({ status: "selected" }).where(eq(bids.id, bidId)),
-      db.update(bids).set({ status: "rejected" }).where(and(eq(bids.rfqId, rfqId), ne(bids.id, bidId))),
-      db.update(rfqs).set({ status: "awarded" }).where(eq(rfqs.id, rfqId)),
+    const created = sql`EXISTS (SELECT 1 FROM orders WHERE id = ${orderId})`
+    // One transaction. The insert happens only if the limits still hold at write time, counting every order
+    // committed today; the updates happen only if the insert did. The unique index on orders.rfq_id
+    // rolls everything back if another selection for this RFQ won.
+    const [, , , awarded] = await db.batch([
+      db.run(sql`
+        INSERT INTO orders (id, org_id, rfq_id, bid_id, approved_by_user_id, status, created_at)
+        SELECT ${orderId}, ${session.orgId}, ${rfqId}, ${bidId}, ${session.userId}, 'approved', ${Date.now()}
+        FROM policies p
+        WHERE p.org_id = ${session.orgId}
+          AND p.frozen_at IS NULL
+          AND ${bid.amountCents} <= p.per_order_limit_cents
+          AND (${session.role} = 'owner' OR ${bid.amountCents} <= p.approval_threshold_cents)
+          AND ${bid.amountCents} + (
+            SELECT coalesce(sum(b.amount_cents), 0) FROM orders o JOIN bids b ON b.id = o.bid_id
+            WHERE o.org_id = ${session.orgId} AND o.created_at >= ${utcMidnight()} AND o.status != 'cancelled'
+          ) <= p.daily_spend_limit_cents
+      `),
+      db.update(bids).set({ status: "selected" }).where(and(eq(bids.id, bidId), created)),
+      db.update(bids).set({ status: "rejected" }).where(and(eq(bids.rfqId, rfqId), ne(bids.id, bidId), created)),
+      db.update(rfqs).set({ status: "awarded" }).where(and(eq(rfqs.id, rfqId), created)).returning({ id: rfqs.id }),
     ])
+    if (awarded.length === 0) {
+      // Something changed between the check and the write: report the rule that now refuses it.
+      await refuse((await check()) ?? { reason: "Policy changed during selection; nothing was created. Try again.", status: 409 })
+    }
     await recordAudit({ ...auditFor(session), action: "order.approved", target: orderId, metadata: { rfqId, bidId, amountCents: bid.amountCents } })
     return orderId
   } catch (error) {
     if (isUniqueViolation(error)) throw new DomainError("A supplier was already selected for this RFQ.", 409)
     throw error
   }
+}
+
+// --- Freeze ---
+
+/**
+ * Freezing blocks supplier selection, draft approval and agent drafts until an owner unfreezes.
+ * Owners and operators can freeze; only owners can unfreeze. It does not touch any on-chain key yet.
+ */
+export async function setFrozen(session: Session, frozen: boolean) {
+  if (!frozen && session.role !== "owner") throw new DomainError("Only an owner can unfreeze procurement.", 403)
+  const [row] = await getDb()
+    .update(policies)
+    .set(frozen ? { frozenAt: Date.now(), frozenByUserId: session.userId } : { frozenAt: null, frozenByUserId: null })
+    .where(and(eq(policies.orgId, session.orgId), frozen ? sql`${policies.frozenAt} IS NULL` : sql`${policies.frozenAt} IS NOT NULL`))
+    .returning({ id: policies.id })
+  // Already in the requested state: nothing changed, so nothing to audit.
+  if (row) await recordAudit({ ...auditFor(session), action: frozen ? "procurement.frozen" : "procurement.unfrozen", target: row.id })
+  return (await loadPolicy(session.orgId)).frozenAt
 }
 
 // --- Policy ---
@@ -313,6 +574,7 @@ async function loadPolicy(orgId: string): Promise<PolicyView> {
     approvedChains: row.approvedChains,
     agentKeyExpiryHours: row.agentKeyExpiryHours,
     freezeBehavior: row.freezeBehavior,
+    frozenAt: row.frozenAt,
   }
 }
 

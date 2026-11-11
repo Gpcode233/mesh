@@ -1,20 +1,35 @@
 import { and, desc, eq, lte } from "drizzle-orm"
 import { NextRequest } from "next/server"
-import { callAgentModel, ProviderError } from "@/lib/ai-provider"
-import { isAgentId } from "@/lib/agents"
+import { buildAgentTools, type ToolTurnState } from "@/lib/agent-tools"
+import { ProviderError, streamAgentModel } from "@/lib/ai-provider"
+import { isAgentId, type AgentId } from "@/lib/agents"
 import { recordAudit } from "@/lib/audit"
-import { canOperate, getSession } from "@/lib/auth"
+import { canOperate, getSession, type Session } from "@/lib/auth"
+import { NDJSON, type ChatReply, type ChatStreamEvent, type ToolStep } from "@/lib/chat-events"
 import { historyForAgent } from "@/lib/chat-history"
 import { getDb } from "@/lib/db"
 import { conversations, messages } from "@/lib/db/schema"
-import { getApprovalViews, proposeRfq } from "@/lib/procurement"
+import { getApprovalViews } from "@/lib/procurement"
 import { consumeRateLimit, limitFromEnv } from "@/lib/rate-limit"
-import { parseRfqDraft, type ApprovalView } from "@/lib/rfq"
+import type { ApprovalView } from "@/lib/rfq"
 
 const MAX_CONTENT = 4000
 const HISTORY_LIMIT = 12
 const TURN_ID = /^[A-Za-z0-9_-]{8,64}$/
 
+type Turn = {
+  session: Session
+  agent: AgentId
+  channel: "direct" | "group"
+  content: string
+  clientTurnId: string
+  context: string
+}
+
+/**
+ * Accepts one new message and returns the agent's reply. Clients that send `Accept: application/x-ndjson`
+ * receive text and tool steps as they happen, ending in a `done` or `error` event; others receive JSON.
+ */
 export async function POST(request: NextRequest) {
   const session = await getSession()
   if (!session) return Response.json({ error: "Sign in required." }, { status: 401 })
@@ -46,6 +61,48 @@ export async function POST(request: NextRequest) {
     )
   }
 
+  const turn: Turn = { session, agent, channel, content: content.trim(), clientTurnId, context }
+
+  if (!request.headers.get("accept")?.includes(NDJSON)) {
+    try {
+      return Response.json(await runTurn(turn, () => {}))
+    } catch (error) {
+      const { error: message, status } = describeError(error)
+      return Response.json({ error: message }, { status })
+    }
+  }
+
+  const encoder = new TextEncoder()
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const send = (event: ChatStreamEvent) => {
+        try {
+          controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`))
+        } catch {
+          // The client went away; the turn still finishes and is stored.
+        }
+      }
+      try {
+        send({ type: "done", ...(await runTurn(turn, send)) })
+      } catch (error) {
+        send({ type: "error", ...describeError(error) })
+      } finally {
+        try { controller.close() } catch { /* already closed */ }
+      }
+    },
+  })
+  return new Response(stream, { headers: { "Content-Type": `${NDJSON}; charset=utf-8`, "Cache-Control": "no-store" } })
+}
+
+function describeError(error: unknown) {
+  if (error instanceof ProviderError) return { error: error.message, status: error.status }
+  console.error("Mesh agent chat failed", error)
+  return { error: "The agent could not respond.", status: 500 }
+}
+
+// Not tied to the request signal: a turn finishes and is stored even if the client leaves, so a retry gets it.
+async function runTurn(turn: Turn, send: (event: ChatStreamEvent) => void): Promise<ChatReply> {
+  const { session, agent, channel, clientTurnId } = turn
   const db = getDb()
   const channelKey = channel === "group" ? "group" : `direct:${agent}`
   await db.insert(conversations).values({ orgId: session.orgId, userId: session.userId, channel: channelKey }).onConflictDoNothing()
@@ -56,7 +113,7 @@ export async function POST(request: NextRequest) {
   ))
 
   // Group fan-out sends one turn per agent; the unique index stores the user's message once.
-  await db.insert(messages).values({ conversationId: conversation.id, author: "user", content: content.trim(), clientTurnId }).onConflictDoNothing()
+  await db.insert(messages).values({ conversationId: conversation.id, author: "user", content: turn.content, clientTurnId }).onConflictDoNothing()
   const [userMessage] = await db.select().from(messages).where(and(
     eq(messages.conversationId, conversation.id),
     eq(messages.clientTurnId, clientTurnId),
@@ -71,43 +128,81 @@ export async function POST(request: NextRequest) {
   ))
   if (existing) {
     const stored = existing.approvalId ? await getApprovalViews(session.orgId, [existing.approvalId]) : undefined
-    return Response.json({ agent, content: existing.content, approval: (existing.approvalId && stored?.get(existing.approvalId)) || null })
+    return { agent, content: existing.content, approval: (existing.approvalId && stored?.get(existing.approvalId)) || null, steps: existing.steps ?? [] }
   }
 
   // Cut at this turn so agents answering in parallel do not see each other's replies to it.
-  const recent = await db.select({ author: messages.author, content: messages.content }).from(messages)
+  const recent = await db.select({ author: messages.author, content: messages.content, sources: messages.sources }).from(messages)
     .where(and(eq(messages.conversationId, conversation.id), lte(messages.id, userMessage.id)))
     .orderBy(desc(messages.id))
     .limit(HISTORY_LIMIT)
   const history = historyForAgent(agent, recent.reverse())
 
+  // Group turns get no tools: six agents reading records for one message multiplies cost and noise.
+  // Only the Head Agent drafts, and only in its private thread, so one message makes at most one card.
+  // Only Scout searches the web and proposes suppliers, also only in its private thread.
+  // Search results stored on this agent's earlier replies in the history window can be proposed from too.
+  const state: ToolTurnState = { approval: null, refusal: null, searchResults: new Map() }
+  for (const row of recent) {
+    if (row.author !== agent) continue
+    for (const source of row.sources ?? []) if (!state.searchResults.has(source.url)) state.searchResults.set(source.url, source.title)
+  }
+  const earlierSources = state.searchResults.size
+  const tools = channel === "direct"
+    ? buildAgentTools({ session, agent, messageId: userMessage.id, allowDraft: agent === "head", allowDiscovery: agent === "scout", state })
+    : undefined
+
   const audit = { orgId: session.orgId, actorUserId: session.userId, target: agent }
   try {
-    // The Head Agent drafts RFQs in its private thread only. One proposal per group message would multiply cards.
-    const reply = await callAgentModel({ agent, context, messages: history, allowTools: agent === "head" && channel === "direct" })
+    const reply = await streamAgentModel({
+      agent,
+      context: turn.context,
+      messages: history,
+      tools,
+      onText: (delta) => send({ type: "text", delta }),
+      onStep: (step) => send({ type: "step", step }),
+    })
 
-    let replyText = reply.content
-    let approval: ApprovalView | null = null
-    if (reply.proposeRfqArgs !== undefined) {
-      await recordAudit({ ...audit, action: "agent_tool.called", metadata: { tool: "propose_rfq", messageId: userMessage.id } })
-      const parsed = parseRfqDraft(reply.proposeRfqArgs)
-      if (parsed.ok) {
-        approval = await proposeRfq(session, agent, parsed.draft)
-        replyText = "I drafted this RFQ. Nothing has been created yet: approve it below to create it, or reject it."
-      } else {
-        await recordAudit({ ...audit, action: "agent_tool.rejected", metadata: { tool: "propose_rfq", reason: parsed.error, messageId: userMessage.id } })
-        replyText = `I couldn't draft that RFQ: ${parsed.error} Nothing was created.`
-      }
-    }
+    // The route, not the model, describes the outcome of a proposal.
+    let content = reply.content
+    if (state.approval) content = proposalText(state.approval)
+    else if (state.refusal?.kind === "create_rfq") content = `I couldn't draft that RFQ: ${state.refusal.reason} Nothing was created.`
+    else if (state.refusal?.kind === "add_supplier") content = `I couldn't propose that supplier: ${state.refusal.reason} Nothing was saved.`
+    else if (!content) throw new ProviderError("The agent read records but gave no answer. Try again.", 502)
 
-    await db.insert(messages).values({ conversationId: conversation.id, author: agent, content: replyText, clientTurnId, approvalId: approval?.id }).onConflictDoNothing()
-    await recordAudit({ ...audit, action: "agent_chat.replied", metadata: { channel, provider: reply.provider, model: reply.model, messageId: userMessage.id } })
-    return Response.json({ agent, content: replyText, approval })
+    const steps: ToolStep[] = reply.steps
+    await db.insert(messages).values({
+      conversationId: conversation.id,
+      author: agent,
+      content,
+      clientTurnId,
+      approvalId: state.approval?.id,
+      steps: steps.length ? steps : null,
+      sources: newSources(state, earlierSources),
+    }).onConflictDoNothing()
+    await recordAudit({ ...audit, action: "agent_chat.replied", metadata: { channel, provider: reply.provider, model: reply.model, messageId: userMessage.id, toolCalls: steps.length } })
+    return { agent, content, approval: state.approval, steps }
   } catch (error) {
     const status = error instanceof ProviderError ? error.status : 500
-    const message = error instanceof ProviderError ? error.message : "The agent could not respond."
-    if (!(error instanceof ProviderError)) console.error("Mesh agent chat failed", error)
     await recordAudit({ ...audit, action: "agent_chat.failed", metadata: { channel, status, messageId: userMessage.id } })
-    return Response.json({ error: message }, { status })
+    // A draft stored before the failure still needs a decision; surface it rather than lose it.
+    if (state.approval) {
+      const content = `${proposalText(state.approval)} (My reply failed after this.)`
+      await db.insert(messages).values({ conversationId: conversation.id, author: agent, content, clientTurnId, approvalId: state.approval.id }).onConflictDoNothing()
+      return { agent, content, approval: state.approval, steps: [] }
+    }
+    throw error
   }
+}
+
+function proposalText(approval: ApprovalView) {
+  return approval.kind === "add_supplier"
+    ? `I found ${approval.supplier.name} on the web and proposed adding it to the supplier network. Nothing has been saved yet, and it is not verified: check the source, then approve it below to add it, or reject it.`
+    : "I drafted this RFQ. Nothing has been created yet: approve it below to create it, or reject it."
+}
+
+/** Results first returned during this turn (the map lists earlier ones first), or null. */
+function newSources(state: ToolTurnState, earlier: number) {
+  const fresh = [...state.searchResults].slice(earlier).map(([url, title]) => ({ url, title }))
+  return fresh.length ? fresh : null
 }

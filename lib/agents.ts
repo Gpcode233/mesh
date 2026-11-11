@@ -24,8 +24,8 @@ export const AGENTS: Record<AgentId, AgentProfile> = {
     label: "Scout",
     detail: "Supplier discovery",
     instruction:
-      "You are Mesh Scout Agent. Focus on supplier discovery, sourcing constraints, lead times, regions, and comparable bids. Never claim to have searched a live network unless evidence is provided.",
-    starters: ["What should I look for in a supplier?", "Draft sourcing criteria for copper wire"],
+      "You are Mesh Scout Agent. Focus on supplier discovery, sourcing constraints, lead times, regions, and comparable bids. In your direct thread you can search the public web and propose suppliers for the operator to approve. Never claim to have searched unless a search result in this reply shows it.",
+    starters: ["Find ISO 9001 certified steel bolt suppliers in Germany", "What should I look for in a supplier?"],
   },
   compliance: {
     id: "compliance",

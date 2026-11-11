@@ -19,6 +19,8 @@ export function AppShell({ children }: { children: ReactNode }) {
   const router = useRouter()
   const [formError, setFormError] = useState("")
   const [isSubmitting, setSubmitting] = useState(false)
+  // The chat fills the viewport and scrolls inside its own panes; other pages scroll as documents.
+  const fullHeight = pathname === "/"
 
   useGSAP(() => {
     gsap.from(".editorial-reveal", { opacity: 0, y: 18, duration: 0.85, stagger: 0.08, ease: "power3.out" })
@@ -59,8 +61,8 @@ export function AppShell({ children }: { children: ReactNode }) {
   }
 
   return (
-    <main ref={pageRef} className="mesh-page min-h-svh bg-background text-foreground">
-      <header className="border-b border-foreground/10 bg-background lg:hidden">
+    <main ref={pageRef} className={`mesh-page bg-background text-foreground ${fullHeight ? "flex h-svh flex-col overflow-hidden" : "min-h-svh"}`}>
+      <header className="shrink-0 border-b border-foreground/10 bg-background lg:hidden">
         <div className="flex items-center justify-between px-5 py-4">
           <Logo />
           <div className="flex items-center gap-2"><Button variant="outline" size="sm" onClick={connect}><IconWallet size={15} />{wallet?.accountId ?? "Connect wallet"}</Button><Button variant="ghost" size="icon-sm" aria-label="Sign out" onClick={signOut}><IconLogout size={15} /></Button></div>
@@ -68,9 +70,9 @@ export function AppShell({ children }: { children: ReactNode }) {
         <MobileNav />
       </header>
 
-      <div className="mx-auto flex max-w-[1540px] gap-0 px-3 pb-16 pt-3 lg:px-5">
+      <div className={`mx-auto flex w-full max-w-[1540px] gap-0 px-3 pt-3 lg:px-5 ${fullHeight ? "min-h-0 flex-1 pb-3" : "pb-16"}`}>
         <Sidebar />
-        <div className="min-w-0 flex-1 lg:pl-8">{children}</div>
+        <div className={`min-w-0 flex-1 ${fullHeight ? "min-h-0 lg:pl-4" : "lg:pl-8"}`}>{children}</div>
       </div>
 
       {toast && <div className="fixed bottom-6 left-1/2 z-[60] flex -translate-x-1/2 animate-toast items-center gap-2 rounded-full border border-primary/30 bg-[#172126]/95 px-4 py-2.5 text-xs font-medium text-[#d9f8df] shadow-[0_18px_50px_oklch(0.2_0.05_210/0.25)] backdrop-blur-xl"><IconCheck size={15} className="text-[#9bdba5]" /> {toast}</div>}

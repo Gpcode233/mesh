@@ -14,7 +14,7 @@ import { OrderRows, OrdersEmpty } from "@/components/mesh/orders-view"
 import type { OrderRow, SupplierView } from "@/lib/rfq"
 
 export function OverviewView({ orders, suppliers }: { orders: OrderRow[]; suppliers: SupplierView[] }) {
-  const { events, wallet, isFrozen, isRevoking, setModalOpen, emergencyFreeze, simulateIntent, simulateKeyRotation } = useMesh()
+  const { operator, events, isFrozen, isFreezing, setModalOpen, setProcurementFrozen, simulateIntent, simulateKeyRotation } = useMesh()
   const [isTerminalOpen, setTerminalOpen] = useState(true)
 
   return (
@@ -49,8 +49,10 @@ export function OverviewView({ orders, suppliers }: { orders: OrderRow[]; suppli
           <div className="flex items-start justify-between"><div><p className="eyebrow text-[#93a39d]">02 / Safety control</p><h2 className="mt-3 text-2xl font-medium tracking-[-0.04em]">Guard Watcher</h2></div><span className={`grid size-9 place-items-center rounded-full ${isFrozen ? "bg-[#f18b76]/20 text-[#f18b76]" : "bg-[#c6e8cd] text-[#31563b]"}`}><IconShieldCheck size={18} /></span></div>
           <div className="mt-8 border-y border-white/10 py-5"><div className="flex justify-between text-[11px] text-[#93a39d]"><span>Daily velocity</span><span>$42,180 / $50,000</span></div><div className="mt-3 h-1.5 overflow-hidden rounded-full bg-white/10"><div className={`h-full rounded-full bg-[#a7ddb0] transition-all duration-700 ${isFrozen ? "w-0" : "w-[84%]"}`} /></div></div>
           <div className="space-y-4 py-5 text-xs"><StatusRow label="Spending velocity" value={isFrozen ? "Paused" : "Nominal"} /><StatusRow label="Key rotation" value="Every 24h" /><StatusRow label="TEE attestation" value="Simulated" /></div>
-          <Button className="mt-3 w-full bg-[#f18b76] text-[#321714] hover:bg-[#ff9d89]" onClick={emergencyFreeze} disabled={!wallet || isRevoking || isFrozen}>{isRevoking ? "Revoking keys..." : isFrozen ? "All keys revoked" : "Revoke all keys & freeze"}</Button>
-          {!wallet && <p className="mt-3 text-center text-[11px] text-[#93a39d]">Connect wallet to enable emergency controls.</p>}
+          {isFrozen
+            ? <Button className="mt-3 w-full bg-[#a7ddb0] text-[#14301b] hover:bg-[#bfe8c6]" onClick={() => setProcurementFrozen(false)} disabled={isFreezing || operator.role !== "owner"}>{isFreezing ? "Unfreezing…" : operator.role === "owner" ? "Unfreeze procurement" : "Frozen: an owner must unfreeze"}</Button>
+            : <Button className="mt-3 w-full bg-[#f18b76] text-[#321714] hover:bg-[#ff9d89]" onClick={() => setProcurementFrozen(true)} disabled={isFreezing || operator.role === "viewer"}>{isFreezing ? "Freezing…" : "Freeze procurement"}</Button>}
+          <p className="mt-3 text-center text-[11px] text-[#93a39d]">Blocks supplier selection, RFQ approval, agent drafts and payouts, and freezes the NEAR escrow contract. Only the owner can unfreeze the contract, from their wallet.</p>
         </aside>
       </section>
 

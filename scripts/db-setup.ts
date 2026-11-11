@@ -57,7 +57,7 @@ await db.insert(policies).values({
   requiredBidCount: 3,
   approvedRegions: ["EU", "US", "JP"],
   requiredDocuments: ["ISO 9001", "Sanctions screening"],
-  approvedAssets: ["USDC", "USDT"],
+  approvedAssets: ["NEAR", "USDC", "USDT"],
   approvedChains: ["NEAR", "Ethereum"],
   agentKeyExpiryHours: 24,
   freezeBehavior: "Revoke all keys",

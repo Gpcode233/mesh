@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm"
 import { index, integer, real, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core"
+import type { ToolStep } from "../chat-events"
 
 /**
  * Money columns are integer minor units (USD/USDC cents) to avoid float rounding.
@@ -88,6 +89,9 @@ export const policies = sqliteTable("policies", {
   approvedChains: text("approved_chains", { mode: "json" }).$type<string[]>().notNull(),
   agentKeyExpiryHours: integer("agent_key_expiry_hours").notNull(),
   freezeBehavior: text("freeze_behavior").notNull(),
+  /** Set while procurement is frozen: no supplier selection, RFQ approval or agent draft until an owner unfreezes. */
+  frozenAt: integer("frozen_at"),
+  frozenByUserId: text("frozen_by_user_id"),
   updatedAt: integer("updated_at").notNull().$defaultFn(() => Date.now()),
 }, (t) => [uniqueIndex("policies_org").on(t.orgId)])
 
@@ -99,6 +103,10 @@ export const suppliers = sqliteTable("suppliers", {
   name: text("name").notNull(),
   region: text("region"),
   nearAccountId: text("near_account_id"),
+  /** For suppliers added from web discovery: the search result page the operator approved. */
+  sourceUrl: text("source_url"),
+  /** Compliance documents an operator has marked as on file. Operator-attested, not verified. */
+  documents: text("documents", { mode: "json" }).$type<string[]>().notNull().default(sql`'[]'`),
   verificationStatus: text("verification_status", { enum: ["unverified", "verified", "rejected"] }).notNull().default("unverified"),
   createdAt: createdAt(),
 }, (t) => [uniqueIndex("suppliers_org_name").on(t.orgId, t.name)])
@@ -146,7 +154,11 @@ export const milestones = sqliteTable("milestones", {
   orgId: orgId(),
   orderId: text("order_id").notNull().references(() => orders.id, { onDelete: "cascade" }),
   title: text("title").notNull(),
+  /** Index of this milestone in the escrow contract's order. */
+  position: integer("position").notNull().default(0),
   amountCents: integer("amount_cents").notNull(),
+  /** Escrowed amount in yoctoNEAR, as a decimal string (it exceeds a JS number). */
+  amountYocto: text("amount_yocto"),
   status: text("status", { enum: ["pending", "evidence_submitted", "verified", "paid"] }).notNull().default("pending"),
   createdAt: createdAt(),
 }, (t) => [index("milestones_order").on(t.orderId)])
@@ -167,13 +179,20 @@ export const settlements = sqliteTable("settlements", {
   orgId: orgId(),
   orderId: text("order_id").notNull().references(() => orders.id, { onDelete: "restrict" }),
   milestoneId: text("milestone_id").references(() => milestones.id, { onDelete: "restrict" }),
+  /** escrow_funding: the owner funded the escrow; milestone_payout: the escrow paid the supplier. */
+  kind: text("kind", { enum: ["escrow_funding", "milestone_payout"] }).notNull().default("milestone_payout"),
   // Unique per org so a retried payment or payout cannot execute twice.
   idempotencyKey: text("idempotency_key").notNull(),
   amountCents: integer("amount_cents").notNull(),
+  amountYocto: text("amount_yocto"),
   asset: text("asset").notNull(),
   chain: text("chain").notNull(),
+  // Hash of a transaction Mesh signed and sent, before its outcome is known. Not proof of anything.
+  submittedTxHash: text("submitted_tx_hash"),
   // Null until a chain query has confirmed finality; never store a local placeholder here.
   confirmedTxHash: text("confirmed_tx_hash"),
+  /** Why the last attempt failed, as reported by the chain or the RPC. */
+  error: text("error"),
   status: text("status", { enum: ["pending", "submitted", "confirmed", "failed"] }).notNull().default("pending"),
   createdAt: createdAt(),
 }, (t) => [uniqueIndex("settlements_org_idempotency").on(t.orgId, t.idempotencyKey)])
@@ -184,7 +203,7 @@ export const settlements = sqliteTable("settlements", {
 export const approvals = sqliteTable("approvals", {
   id: id(),
   orgId: orgId(),
-  kind: text("kind", { enum: ["create_rfq"] }).notNull(),
+  kind: text("kind", { enum: ["create_rfq", "add_supplier"] }).notNull(),
   requestedByAgent: text("requested_by_agent").notNull(),
   requestedByUserId: text("requested_by_user_id").references(() => users.id, { onDelete: "set null" }),
   payload: text("payload", { mode: "json" }).$type<Record<string, unknown>>().notNull(),
@@ -217,6 +236,11 @@ export const messages = sqliteTable("messages", {
   // Client-generated turn id: makes retries and group fan-out idempotent.
   clientTurnId: text("client_turn_id").notNull(),
   approvalId: text("approval_id").references(() => approvals.id, { onDelete: "set null" }),
+  // Tool steps the agent ran for this reply: tool names, statuses and content-free summaries.
+  steps: text("steps", { mode: "json" }).$type<ToolStep[]>(),
+  // Web search results this reply's searches returned, written by the server. A later turn in the same
+  // thread may propose a supplier from these; the model and the client cannot add to them.
+  sources: text("sources", { mode: "json" }).$type<Array<{ url: string; title: string }>>(),
   createdAt: createdAt(),
 }, (t) => [uniqueIndex("messages_turn_author").on(t.conversationId, t.clientTurnId, t.author)])
 

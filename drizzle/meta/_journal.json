@@ -15,6 +15,41 @@
       "when": 1794009740160,
       "tag": "0001_sloppy_white_tiger",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1794214954503,
+      "tag": "0002_tan_scorpion",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1794225473047,
+      "tag": "0003_slim_iron_patriot",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1794254273893,
+      "tag": "0004_fast_iron_monger",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1794258882517,
+      "tag": "0005_special_maddog",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1794325872847,
+      "tag": "0006_daily_sir_ram",
+      "breakpoints": true
     }
   ]
 }
